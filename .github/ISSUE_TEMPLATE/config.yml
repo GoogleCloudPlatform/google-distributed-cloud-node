@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a Security Vulnerability
+    url: https://g.co/vulnz
+    about: Please report security issues privately through Google's Vulnerability Reward Program instead of opening a public GitHub issue.
+  - name: Google Cloud Support
+    url: https://cloud.google.com/support/
+    about: If you have a Google Cloud support contract, open a case in the support console for timely assistance.
