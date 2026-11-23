@@ -2,5 +2,53 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "rebaseWhen": "conflicted",
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security",
+      "automerge"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Auto-merge GitHub Actions minor, patch, digest, and pinDigest updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest"
+      ],
+      "addLabels": [
+        "automerge"
+      ]
+    },
+    {
+      "description": "Auto-merge npm minor, patch, digest, pinDigest, and lockfile updates",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest",
+        "lockFileMaintenance"
+      ],
+      "addLabels": [
+        "automerge"
+      ]
+    },
+    {
+      "description": "Require manual review for major updates",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false
+    }
   ]
 }

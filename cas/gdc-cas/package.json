@@ -20,7 +20,7 @@
     "jsonwebtoken": "^9.0.2"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "build:proto": "pbjs -t json-module -w es6 --keep-case proto/cas.proto | awk 'BEGIN{while((getline line < \"proto/cas.proto\")>0 && line ~ /^\\/\\//) print line; print \"\"} {print}' > proto/cas-json.js"
   },
   "devDependencies": {

@@ -3,6 +3,9 @@
   "bin": "dist/run-example.cjs",
   "type": "module",
   "license": "Apache-2.0",
+  "scripts": {
+    "test": "npm --prefix gdc-cas test"
+  },
   "dependencies": {
     "gdc-cas": "file:./gdc-cas",
     "node-forge": "^1.4.3"

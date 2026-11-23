@@ -1,0 +1,108 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (Syntax & Build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (gdc-cas)
+        working-directory: cas/gdc-cas
+        run: npm ci --no-audit --no-fund
+
+      - name: Install dependencies (cas)
+        working-directory: cas
+        run: npm ci --no-audit --no-fund
+
+      - name: Validate JSON configuration files
+        run: |
+          node -e "
+            const fs = require('node:fs');
+            for (const f of ['renovate.json', 'cas/package.json', 'cas/gdc-cas/package.json']) {
+              JSON.parse(fs.readFileSync(f, 'utf8'));
+            }
+          "
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check cas/gdc-cas/index.js
+          node --check cas/gdc-cas/cas-client.js
+          node --check cas/gdc-cas/sts-auth.js
+          node --check cas/gdc-cas/proto/cas-json.js
+          node --check cas/run-example.js
+          node --check .github/scripts/evaluate-bot-pr.mjs
+
+      - name: Verify gdc-cas ESM exports
+        run: |
+          node --input-type=module -e "
+            import { CASClient, RevocationReason } from './cas/gdc-cas/index.js';
+            if (typeof CASClient !== 'function' || typeof RevocationReason?.KEY_COMPROMISE !== 'number') {
+              throw new Error('Unexpected exports from gdc-cas');
+            }
+          "
+
+      - name: Verify protobuf descriptor generation
+        working-directory: cas/gdc-cas
+        run: |
+          npm run build:proto
+          git diff --exit-code proto/cas-json.js
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (gdc-cas)
+        working-directory: cas/gdc-cas
+        run: npm ci --no-audit --no-fund
+
+      - name: Run gdc-cas unit tests
+        working-directory: cas/gdc-cas
+        run: npm test
+
+      - name: Run bot PR evaluator unit tests
+        run: node --test .github/scripts/evaluate-bot-pr.test.mjs
