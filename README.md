@@ -18,7 +18,8 @@ This repository contains the client library modules and developer utilities desi
 ```
 google-distributed-cloud-node/
 ├── .github/
-│   └── CODEOWNERS            # Repository code owners
+│   ├── ISSUE_TEMPLATE/       # Bug report and feature request templates
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── cas/
 │   ├── gdc-cas/              # The 'gdc-cas' npm package source
 │   │   ├── cas-client.js     # CAS client implementation (KRM & gRPC)
@@ -27,10 +28,14 @@ google-distributed-cloud-node/
 │   │   └── proto/            # Protocol buffer definitions & compiled descriptors
 │   ├── run-example.js        # CAS client example and QPS benchmark runner
 │   └── README.md             # Load testing guide and execution modes
+├── CODEOWNERS                # Repository code owners
+├── CODE_OF_CONDUCT.md        # Contributor Code of Conduct
 ├── CONTRIBUTING.md           # Guidelines for contributing to this project
 ├── LICENSE                   # Apache 2.0 license
 ├── NOTICE                    # Copyright and third-party attribution notices
-└── README.md                 # Root documentation
+├── README.md                 # Root documentation
+├── SECURITY.md               # Security vulnerability reporting policy
+└── renovate.json             # Automated dependency update configuration
 ```
 
 ## Quick Start (`gdc-cas`)
@@ -81,7 +86,11 @@ To interact with GDC air-gapped services using this SDK (currently CAS), you wil
 
 Contributions are welcome — both improvements to existing packages (`cas/gdc-cas`) and new Node.js client libraries for additional Google Distributed Cloud air-gapped services!
 
-Please place new service clients in their own top-level directory alongside `cas/` (with a self-contained `package.json`, documentation, and tests), and read [CONTRIBUTING.md](./CONTRIBUTING.md) for details on submitting pull requests and signing the Google Contributor License Agreement (CLA).
+Please place new service clients in their own top-level directory alongside `cas/` (with a self-contained `package.json`, documentation, and tests), and read [CONTRIBUTING.md](./CONTRIBUTING.md) and our [Code of Conduct](./CODE_OF_CONDUCT.md) before submitting a pull request.
+
+## Security
+
+To report a security vulnerability, please follow the instructions in [SECURITY.md](./SECURITY.md) rather than opening a public GitHub issue.
 
 ## License
 
