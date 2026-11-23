@@ -211,6 +211,8 @@ jobs:
             fi
 
             if ! gh pr merge --auto --squash "${pr_num}" --repo "${REPO_FULL_NAME}"; then
-              echo "::warning::Could not enable GitHub auto-merge on PR #${pr_num}. Ensure 'Allow auto-merge' is enabled in Repository Settings."
+              if ! gh pr merge --squash "${pr_num}" --repo "${REPO_FULL_NAME}"; then
+                echo "::warning::Could not merge or enable auto-merge on PR #${pr_num} (it may have a merge conflict requiring rebase)."
+              fi
             fi
           done
