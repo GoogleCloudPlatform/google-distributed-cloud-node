@@ -10,7 +10,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Test coverage
+# Test files & coverage
+test/
 coverage/
 
 # Build artifacts (if any are generated in source dirs)
