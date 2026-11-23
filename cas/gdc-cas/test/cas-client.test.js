@@ -247,10 +247,54 @@ describe('CASClient KRM and gRPC operations', () => {
 
       originalGrpcClient.close();
       if (client.keepAliveAgent) {
-        client.keepAliveAgent.destroy();
+        await client.keepAliveAgent.close();
       }
     } finally {
       await stopServer(server);
+    }
+  });
+
+  it('executes real KRM HTTP requests through @kubernetes/client-node v2 and Undici dispatcher', async () => {
+    const { server: stsServer, url: stsUrl } = await startMockStsServer();
+    let seenAuthHeader = '';
+    const k8sServer = http.createServer((req, res) => {
+      seenAuthHeader = req.headers.authorization || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (req.url.includes('/certificaterequests')) {
+        res.end(JSON.stringify({ items: [{ metadata: { name: 'cr-live-1' } }] }));
+      } else {
+        res.end(JSON.stringify({}));
+      }
+    });
+    await new Promise((resolve) => k8sServer.listen(0, '127.0.0.1', resolve));
+    const k8sPort = k8sServer.address().port;
+
+    try {
+      const client = new CASClient({
+        zone: 'us-west6-a',
+        skipKubeTLSVerify: true,
+        serviceAccount: {
+          name: 'test-sa',
+          project: 'test-proj',
+          private_key_id: 'key-1',
+          private_key: createEphemeralPrivateKey(),
+          token_uri: stsUrl,
+        },
+      });
+      client._getManagementApiUrl = () => `http://127.0.0.1:${k8sPort}`;
+
+      await client.init();
+      const listRes = await client.listCertificateRequests('test-proj');
+      assert.equal(seenAuthHeader, 'Bearer mock-sts-token');
+      assert.equal(listRes.items.length, 1);
+      assert.equal(listRes.items[0].metadata.name, 'cr-live-1');
+
+      if (client.keepAliveAgent) {
+        await client.keepAliveAgent.close();
+      }
+    } finally {
+      await stopServer(k8sServer);
+      await stopServer(stsServer);
     }
   });
 });

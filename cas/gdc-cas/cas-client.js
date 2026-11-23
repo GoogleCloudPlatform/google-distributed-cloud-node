@@ -15,7 +15,7 @@
 import * as k8s from '@kubernetes/client-node';
 import fs from 'fs';
 import { URL } from 'url';
-import https from 'https';
+import { Agent as UndiciAgent } from 'undici';
 
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
@@ -397,6 +397,9 @@ export class CASClient {
           name: this.kubeClientParams.clusterName,
           server: this.kubeApiServerUrl,
           caFile: this.config.caFilePath,
+          caData: (!this.config.caFilePath && this.stsAuthParams.stsCaCertContent)
+            ? Buffer.from(this.stsAuthParams.stsCaCertContent).toString('base64')
+            : undefined,
           skipTLSVerify: this.kubeClientParams.skipTLSVerify,
         });
         this.kubeConfigInstance.addUser({
@@ -414,17 +417,23 @@ export class CASClient {
         const middlewares = [];
         if (this.config.keepAlive !== false) {
           if (!this.keepAliveAgent) {
-            this.keepAliveAgent = new https.Agent({
-              keepAlive: true,
-              maxSockets: this.config.maxSockets !== undefined ? this.config.maxSockets : 1000,
-              maxFreeSockets: this.config.maxFreeSockets !== undefined ? this.config.maxFreeSockets : 256,
-              ca: this.stsAuthParams.stsCaCertContent,
-              rejectUnauthorized: !this.kubeClientParams.skipTLSVerify,
+            this.keepAliveAgent = new UndiciAgent({
+              connections: this.config.maxSockets !== undefined ? this.config.maxSockets : 1000,
+              connect: {
+                ca: this.stsAuthParams.stsCaCertContent,
+                rejectUnauthorized: !this.kubeClientParams.skipTLSVerify,
+                keepAlive: true,
+                keepAliveInitialDelay: 30000,
+              },
             });
 
             this.keepAliveMiddleware = {
               pre: async (context) => {
-                context.setAgent(this.keepAliveAgent);
+                if (typeof context.setDispatcher === 'function') {
+                  context.setDispatcher(this.keepAliveAgent);
+                } else if (typeof context.setAgent === 'function') {
+                  context.setAgent(this.keepAliveAgent);
+                }
                 return context;
               },
               post: async (response) => response

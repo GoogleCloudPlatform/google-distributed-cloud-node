@@ -473,10 +473,14 @@ async function runLoadTest(config) {
     console.log(`Run ${r + 1} finished in ${formatDurationMs(runDuration)}`);
 
     if (casClient.keepAliveAgent) {
-      const activeSockets = Object.values(casClient.keepAliveAgent.sockets).reduce((acc, arr) => acc + arr.length, 0);
-      const freeSockets = Object.values(casClient.keepAliveAgent.freeSockets).reduce((acc, arr) => acc + arr.length, 0);
-      const requestsQueue = Object.values(casClient.keepAliveAgent.requests).reduce((acc, arr) => acc + arr.length, 0);
-      console.log(`[Agent Stats] Active sockets: ${activeSockets}, Free (Keep-Alive) sockets: ${freeSockets}, Queued requests: ${requestsQueue}`);
+      if (casClient.keepAliveAgent.stats) {
+        console.log(`[Agent Stats] Undici pool stats:`, JSON.stringify(casClient.keepAliveAgent.stats));
+      } else if (casClient.keepAliveAgent.sockets) {
+        const activeSockets = Object.values(casClient.keepAliveAgent.sockets).reduce((acc, arr) => acc + arr.length, 0);
+        const freeSockets = Object.values(casClient.keepAliveAgent.freeSockets || {}).reduce((acc, arr) => acc + arr.length, 0);
+        const requestsQueue = Object.values(casClient.keepAliveAgent.requests || {}).reduce((acc, arr) => acc + arr.length, 0);
+        console.log(`[Agent Stats] Active sockets: ${activeSockets}, Free (Keep-Alive) sockets: ${freeSockets}, Queued requests: ${requestsQueue}`);
+      }
     } else {
       console.log("[Agent Stats] No keepAliveAgent configured on client.");
     }
@@ -750,10 +754,14 @@ async function runSustainedTest(config) {
   const totalDurationMs = Date.now() - globalStartTime;
 
   if (casClient.keepAliveAgent) {
-    const activeSockets = Object.values(casClient.keepAliveAgent.sockets).reduce((acc, arr) => acc + arr.length, 0);
-    const freeSockets = Object.values(casClient.keepAliveAgent.freeSockets).reduce((acc, arr) => acc + arr.length, 0);
-    const requestsQueue = Object.values(casClient.keepAliveAgent.requests).reduce((acc, arr) => acc + arr.length, 0);
-    console.log(`[Agent Stats] Active sockets: ${activeSockets}, Free (Keep-Alive) sockets: ${freeSockets}, Queued requests: ${requestsQueue}`);
+    if (casClient.keepAliveAgent.stats) {
+      console.log(`[Agent Stats] Undici pool stats:`, JSON.stringify(casClient.keepAliveAgent.stats));
+    } else if (casClient.keepAliveAgent.sockets) {
+      const activeSockets = Object.values(casClient.keepAliveAgent.sockets).reduce((acc, arr) => acc + arr.length, 0);
+      const freeSockets = Object.values(casClient.keepAliveAgent.freeSockets || {}).reduce((acc, arr) => acc + arr.length, 0);
+      const requestsQueue = Object.values(casClient.keepAliveAgent.requests || {}).reduce((acc, arr) => acc + arr.length, 0);
+      console.log(`[Agent Stats] Active sockets: ${activeSockets}, Free (Keep-Alive) sockets: ${freeSockets}, Queued requests: ${requestsQueue}`);
+    }
   }
 
   let successCount = 0;
