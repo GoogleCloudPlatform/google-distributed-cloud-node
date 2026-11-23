@@ -1,0 +1,216 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Renovate Auto-Merge
+
+# Runs on a trusted schedule on main (plus manual workflow_dispatch) rather than
+# pull_request_target or workflow_run so cross-repository fork PRs from
+# renovate-bot can be safely evaluated via GitHub's GraphQL API and approved
+# without ever executing untrusted PR code.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Bot PR number to evaluate and auto-approve (leave empty to evaluate all open eligible bot PRs)'
+        required: false
+        default: ''
+        type: string
+      allow_major:
+        description: 'Allow approving a major version update when dispatching manually for a specific PR'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: renovate-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Approve & Enable Auto-Merge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+    steps:
+      - name: Checkout trusted evaluator script from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+
+      - name: Evaluate PR conditions, approve, and enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          DISPATCH_ALLOW_MAJOR: ${{ inputs.allow_major }}
+        run: |
+          set -euo pipefail
+
+          repo_owner="${REPO_FULL_NAME%%/*}"
+          repo_name="${REPO_FULL_NAME##*/}"
+
+          declare -a target_prs=()
+          allow_major="false"
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            cleaned_pr="${DISPATCH_PR_NUMBER//#/}"
+            cleaned_pr="${cleaned_pr//[[:space:]]/}"
+            if [[ -n "${cleaned_pr}" ]]; then
+              if ! [[ "${cleaned_pr}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Invalid pull request number '${DISPATCH_PR_NUMBER}'."
+                exit 1
+              fi
+              target_prs+=("${cleaned_pr}")
+              if [[ "${DISPATCH_ALLOW_MAJOR}" == "true" ]]; then
+                allow_major="true"
+              fi
+            fi
+          fi
+
+          if [[ "${#target_prs[@]}" -eq 0 ]]; then
+            mapfile -t target_prs < <(
+              gh pr list --repo "${REPO_FULL_NAME}" --state open --base main --limit 50 \
+                --json number,author \
+                --jq '.[] | select((.author.login // "" | ascii_downcase) | IN("renovate-bot", "renovate[bot]", "app/renovate", "dependabot[bot]", "app/dependabot")) | .number'
+            )
+          fi
+
+          if [[ "${#target_prs[@]}" -eq 0 ]]; then
+            echo "No open Renovate/Dependabot pull requests targeting main found."
+            exit 0
+          fi
+
+          query_file="$(mktemp)"
+          pr_json_file="$(mktemp)"
+          trap 'rm -f "${query_file}" "${pr_json_file}"' EXIT
+
+          cat <<'GRAPHQL' > "${query_file}"
+          query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                number
+                state
+                isDraft
+                baseRefName
+                headRefOid
+                title
+                body
+                author {
+                  __typename
+                  login
+                }
+                labels(first: 50) {
+                  nodes {
+                    name
+                  }
+                }
+                reviewThreads(first: 100) {
+                  pageInfo {
+                    hasNextPage
+                  }
+                  nodes {
+                    isResolved
+                  }
+                }
+                latestReviews(first: 50) {
+                  nodes {
+                    state
+                    author {
+                      login
+                    }
+                    commit {
+                      oid
+                    }
+                  }
+                }
+                commits(last: 1) {
+                  nodes {
+                    commit {
+                      statusCheckRollup {
+                        contexts(first: 100) {
+                          pageInfo {
+                            hasNextPage
+                          }
+                          nodes {
+                            __typename
+                            ... on CheckRun {
+                              name
+                              status
+                              conclusion
+                              startedAt
+                              completedAt
+                            }
+                            ... on StatusContext {
+                              context
+                              state
+                              createdAt
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+
+          for pr_num in "${target_prs[@]}"; do
+            echo "=== Evaluating PR #${pr_num} ==="
+            gh api graphql \
+              -F owner="${repo_owner}" \
+              -F name="${repo_name}" \
+              -F number="${pr_num}" \
+              -F query="@${query_file}" > "${pr_json_file}"
+
+            eval_json="$(ALLOW_MAJOR="${allow_major}" node .github/scripts/evaluate-bot-pr.mjs "${pr_json_file}")"
+            echo "${eval_json}"
+
+            action="$(jq -r '.action' <<< "${eval_json}")"
+            already_approved="$(jq -r '.alreadyApprovedByActions // false' <<< "${eval_json}")"
+
+            if [[ "${action}" != "approve" ]]; then
+              echo "Skipping PR #${pr_num} (action=${action})."
+              if [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${DISPATCH_PR_NUMBER}" && "${action}" == "block" ]]; then
+                echo "::error::PR #${pr_num} failed auto-approval preconditions."
+                exit 1
+              fi
+              continue
+            fi
+
+            if [[ "${already_approved}" != "true" ]]; then
+              gh pr review --approve "${pr_num}" --repo "${REPO_FULL_NAME}" \
+                --body "Auto-approved: all required checks passed with no unresolved review comments."
+            else
+              echo "PR #${pr_num} is already approved by github-actions[bot] on HEAD."
+            fi
+
+            if ! gh pr merge --auto --squash "${pr_num}" --repo "${REPO_FULL_NAME}"; then
+              echo "::warning::Could not enable GitHub auto-merge on PR #${pr_num}. Ensure 'Allow auto-merge' is enabled in Repository Settings."
+            fi
+          done
