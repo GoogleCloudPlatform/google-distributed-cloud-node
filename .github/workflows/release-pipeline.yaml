@@ -15,13 +15,6 @@
 name: SDK Release & Qualification Pipeline
 
 on:
-  # Temporary PR trigger enabled for pre-merge pipeline validation (removed in follow-up child PR).
-  # Runs in 'snapshot' mode by default, or 'release' dry-run mode (preparing GitHub API release notes)
-  # when the PR has label 'release-dry-run'.
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
-    branches:
-      - main
   # Weeknight GDC Air-gapped Staging snapshot qualification (Mon-Fri 02:00 PST / 10:00 UTC).
   # Snapshot runs execute all unit, smoke, and GDC Staging integration tests without publishing to npmjs.
   schedule:
@@ -68,12 +61,11 @@ concurrency:
 jobs:
   authorize:
     name: Authorize Maintainer & Resolve SemVer
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
-      should_run: ${{ steps.plan.outputs.should_run }}
       release_mode: ${{ steps.plan.outputs.release_mode }}
       package_name: ${{ steps.plan.outputs.package_name }}
       package_dir: ${{ steps.plan.outputs.package_dir }}
@@ -99,7 +91,7 @@ jobs:
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          REPO_SLUG: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
           INPUT_PACKAGE: ${{ inputs.package }}
@@ -109,24 +101,15 @@ jobs:
           chmod +x ./scripts/release/retry.sh
           echo "start_epoch=$(date -u +%s)" >> "${GITHUB_OUTPUT}"
 
-          ./scripts/release/retry.sh 3 2 git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          owners_raw="$(git show origin/main:CODEOWNERS 2>/dev/null || git show origin/main:.github/CODEOWNERS 2>/dev/null || cat CODEOWNERS)"
+          if [[ "${REF_NAME}" != "main" ]]; then
+            echo "::error::The release pipeline must be triggered from 'main' (got '${REF_NAME}')."
+            exit 1
+          fi
 
           mode="snapshot"
-          if [[ "${EVENT_NAME}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
-            head_repo="$(jq -r '.pull_request.head.repo.full_name // empty' "${GITHUB_EVENT_PATH}")"
-            pr_author="$(jq -r '.pull_request.user.login // empty' "${GITHUB_EVENT_PATH}")"
-            pr_author_lc="$(printf '%s' "${pr_author}" | tr '[:upper:]' '[:lower:]')"
-            if [[ "${head_repo}" != "${REPO_SLUG}" ]] || \
-               ! printf '%s\n' "${owners_raw}" | grep -v '^[[:space:]]*#' | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@' | tr '[:upper:]' '[:lower:]' | grep -Fxq "${pr_author_lc}"; then
-              echo "Skipping release pipeline PR test for untrusted or forked PR author '${pr_author}'."
-              echo "should_run=false" >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
-            if jq -e '.pull_request.labels[]? | select(.name == "release-dry-run")' "${GITHUB_EVENT_PATH}" >/dev/null 2>&1; then
-              mode="release"
-            fi
-          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            ./scripts/release/retry.sh 3 2 git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            owners_raw="$(git show origin/main:CODEOWNERS 2>/dev/null || git show origin/main:.github/CODEOWNERS 2>/dev/null || cat CODEOWNERS)"
             actor_lc="$(printf '%s' "${ACTOR}" | tr '[:upper:]' '[:lower:]')"
             if ! printf '%s\n' "${owners_raw}" | grep -v '^[[:space:]]*#' | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@' | tr '[:upper:]' '[:lower:]' | grep -Fxq "${actor_lc}"; then
               echo "::error::Unauthorized actor @${ACTOR}. Only maintainers listed in CODEOWNERS on main may trigger the release pipeline."
@@ -138,7 +121,6 @@ jobs:
           fi
 
           pkg="${INPUT_PACKAGE:-gdc-cas}"
-          echo "should_run=true" >> "${GITHUB_OUTPUT}"
           echo "release_mode=${mode}" >> "${GITHUB_OUTPUT}"
 
           PACKAGE_NAME="${pkg}" RELEASE_MODE="${mode}" COMMIT_SHA="${COMMIT_SHA}" \
@@ -147,7 +129,7 @@ jobs:
   prepare-release-notes:
     name: Prepare Release Notes (GitHub API)
     needs: authorize
-    if: needs.authorize.outputs.should_run == 'true' && needs.authorize.outputs.release_mode == 'release'
+    if: needs.authorize.outputs.release_mode == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -168,11 +150,11 @@ jobs:
           REPO_SLUG: ${{ github.repository }}
           GIT_TAG: ${{ needs.authorize.outputs.git_tag }}
           LAST_TAG: ${{ needs.authorize.outputs.last_tag }}
-          TARGET_REF: ${{ github.event_name == 'pull_request' && 'main' || github.sha }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/release-notes
-          COMMIT_SHA="${TARGET_REF}" node ./scripts/release/semver-helper.mjs prepare-notes /tmp/release-notes/release-notes.md
+          node ./scripts/release/semver-helper.mjs prepare-notes /tmp/release-notes/release-notes.md
           {
             echo "### Prepared Release Notes (\`${GIT_TAG}\`)"
             echo ""
@@ -190,7 +172,6 @@ jobs:
   certify-staging:
     name: Certify Package on GDC Staging
     needs: authorize
-    if: needs.authorize.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     environment: gdc-staging
     timeout-minutes: 20
@@ -262,7 +243,7 @@ jobs:
   publish-npm:
     name: Publish via Google OSS Exit Gate & Tag Release
     needs: [authorize, prepare-release-notes, certify-staging]
-    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.should_run == 'true' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true'
+    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     environment: npm-release
     timeout-minutes: 20
@@ -385,79 +366,6 @@ jobs:
               --title "chore(${PKG_NAME}): bump version to ${next_ver}" \
               --body "Automated post-release SemVer bump following \`${GIT_TAG}\`." || true
           fi
-
-  preview-dashboard:
-    name: Capture Run Telemetry & Preview Dashboard (PR / Branch)
-    needs: [authorize, prepare-release-notes, certify-staging]
-    if: always() && github.ref != 'refs/heads/main' && needs.authorize.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-
-      - name: Download prepared release notes
-        if: needs.prepare-release-notes.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: release-notes
-          path: /tmp/release-notes
-
-      - name: Build dashboard preview with captured telemetry & release notes
-        env:
-          REPO_SLUG: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_NUMBER: ${{ github.run_number }}
-          TRIGGER_EVENT: ${{ github.event_name }}
-          ACTOR: ${{ github.actor }}
-          COMMIT_SHA: ${{ github.sha }}
-          SERVER_URL: ${{ github.server_url }}
-          START_EPOCH: ${{ needs.authorize.outputs.start_epoch }}
-          PACKAGE_NAME: ${{ needs.authorize.outputs.package_name || 'gdc-cas' }}
-          RELEASE_MODE: ${{ needs.authorize.outputs.release_mode || 'snapshot' }}
-          PACKAGE_VERSION: ${{ needs.authorize.outputs.version || '-' }}
-          GIT_TAG: ${{ needs.authorize.outputs.git_tag || '-' }}
-          STAGE_AUTHORIZE: ${{ needs.authorize.result }}
-          STAGE_NOTES: ${{ needs.prepare-release-notes.result }}
-          STAGE_STAGING: ${{ needs.certify-staging.result }}
-        run: |
-          set -euo pipefail
-          now_epoch="$(date -u +%s)"
-          duration_str="N/A"
-          if [[ "${START_EPOCH:-}" =~ ^[0-9]+$ ]]; then
-            elapsed=$(( now_epoch - START_EPOCH ))
-            duration_str="$((elapsed / 60))m $((elapsed % 60))s"
-          fi
-
-          overall="success"
-          if [[ "${STAGE_AUTHORIZE}" == "failure" || "${STAGE_NOTES}" == "failure" || "${STAGE_STAGING}" == "failure" ]]; then
-            overall="failure"
-          elif [[ "${STAGE_AUTHORIZE}" == "cancelled" || "${STAGE_NOTES}" == "cancelled" || "${STAGE_STAGING}" == "cancelled" ]]; then
-            overall="cancelled"
-          fi
-
-          OVERALL_STATUS="${overall}" \
-          DURATION="${duration_str}" \
-          STAGE_PUBLISH="skipped" \
-          RUN_URL="${SERVER_URL}/${REPO_SLUG}/actions/runs/${RUN_ID}" \
-          RELEASE_NOTES_FILE="/tmp/release-notes/release-notes.md" \
-          node ./scripts/release/semver-helper.mjs append-run ./dashboard/data/runs.json
-
-      - name: Upload dashboard preview artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-dashboard-preview
-          path: ./dashboard
-          if-no-files-found: error
-          retention-days: 14
 
   update-dashboard:
     name: Update Release Dashboard (GitHub Pages)
