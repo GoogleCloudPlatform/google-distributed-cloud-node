@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: SDK Release & Qualification Pipeline
+name: gdc-node Release & Qualification Pipeline
 
 on:
   # Weeknight GDC Air-gapped Staging snapshot qualification (Mon-Fri 02:00 PST / 10:00 UTC).
@@ -433,7 +433,7 @@ jobs:
           fi
 
           {
-            echo "### SDK Release & Qualification Summary (Run #${RUN_NUMBER})"
+            echo "### gdc-node Release & Qualification Summary (Run #${RUN_NUMBER})"
             echo ""
             echo "| Field | Value |"
             echo "| :--- | :--- |"
