@@ -1,6 +1,6 @@
 # Google Distributed Cloud Air-gapped Node.js Client SDK (`google-distributed-cloud-node`)
 
-[![SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)
+[![gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)
 [![CI](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml)
 [![Release Pipeline Dashboard](https://img.shields.io/badge/dashboard-GitHub%20Pages-0ea5e9)](https://googlecloudplatform.github.io/google-distributed-cloud-node/)
 
@@ -106,7 +106,7 @@ Continuous qualification and official SemVer npm releases are tracked through th
 
 ### Execution Modes (`snapshot` vs. `release`)
 
-The **[SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** supports two execution modes:
+The **[gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** supports two execution modes:
 
 * **`snapshot` Mode (Weeknight Qualification / Pre-Release)**:
   * Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) and on manual `snapshot` dispatches.
@@ -117,7 +117,7 @@ The **[SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatf
 
 ### Triggering the Pipeline
 
-Maintainers can dispatch the workflow from **[Actions → SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** on `main` or via the GitHub CLI (`gh`):
+Maintainers can dispatch the workflow from **[Actions → gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** on `main` or via the GitHub CLI (`gh`):
 
 | Input | Default | Description |
 | :--- | :--- | :--- |
