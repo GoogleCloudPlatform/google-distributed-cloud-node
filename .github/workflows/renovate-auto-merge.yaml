@@ -15,16 +15,19 @@
 name: Renovate Auto-Merge
 
 # Runs on a trusted schedule on main (plus manual workflow_dispatch) rather than
-# pull_request_target or workflow_run so cross-repository fork PRs from
-# renovate-bot can be safely evaluated via GitHub's GraphQL API and approved
-# without ever executing untrusted PR code.
+# pull_request_target or workflow_run so cross-repository fork PRs from approved
+# dependency bots (renovate-bot, renovate[bot], dependabot[bot]) can be:
+#   1. Certified against GDC Staging using trusted scripts from origin/main
+#      (in a least-privilege job with no contents/pull-requests write access).
+#   2. Auto-approved and queued for squash auto-merge once every required check
+#      (including CAS Integration Test (GDC Staging)) passes with zero open comments.
 on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'Bot PR number to evaluate and auto-approve (leave empty to evaluate all open eligible bot PRs)'
+        description: 'Bot PR number to test on GDC Staging and auto-approve (leave empty to evaluate all open eligible bot PRs)'
         required: false
         default: ''
         type: string
@@ -41,8 +44,150 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  certify-bot-prs:
+    name: Certify Bot PRs (GDC Staging)
+    runs-on: ubuntu-latest
+    environment: gdc-staging
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
+    steps:
+      - name: Checkout trusted scripts from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Stage trusted CI scripts from origin/main
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            git fetch origin main && break
+            [[ "${attempt}" -eq 3 ]] && exit 1
+            sleep $((attempt * 2))
+          done
+          mkdir -p /tmp/ci-bootstrap
+          git show origin/main:scripts/ci-common.sh > /tmp/ci-bootstrap/ci-common.sh
+          source /tmp/ci-bootstrap/ci-common.sh
+          prepare_trusted_ci_files
+          git show origin/main:.github/scripts/evaluate-bot-pr.mjs > "${CI_TRUSTED_DIR}/evaluate-bot-pr.mjs"
+          git show origin/main:.github/scripts/bot-pr-query.graphql > "${CI_TRUSTED_DIR}/bot-pr-query.graphql"
+          echo "CI_TRUSTED_DIR=${CI_TRUSTED_DIR}" >> "${GITHUB_ENV}"
+
+      - name: Run GDC Staging integration tests for eligible bot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          CHECK_NAME: CAS Integration Test (GDC Staging)
+          GDC_CAS_STAGING_SA_KEY: ${{ secrets.GDC_CAS_STAGING_SA_KEY }}
+          GDC_CAS_STAGING_CA_CERT: ${{ secrets.GDC_CAS_STAGING_CA_CERT }}
+          GDC_ORG: ${{ secrets.GDC_ORG || vars.GDC_ORG }}
+          GDC_ZONE: ${{ secrets.GDC_ZONE || vars.GDC_ZONE }}
+          GDC_LAB_URL: ${{ secrets.GDC_LAB_URL || vars.GDC_LAB_URL }}
+          GDC_CAS_PROJECT: ${{ secrets.GDC_CAS_PROJECT || vars.GDC_CAS_PROJECT }}
+          GDC_CAS_CA_NAME: ${{ secrets.GDC_CAS_CA_NAME || vars.GDC_CAS_CA_NAME }}
+        run: |
+          set -euo pipefail
+          source "${CI_TRUSTED_DIR}/scripts/ci-common.sh"
+
+          repo_owner="${REPO_FULL_NAME%%/*}"
+          repo_name="${REPO_FULL_NAME##*/}"
+
+          declare -a target_prs=()
+          force_retest="false"
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            cleaned_pr="${DISPATCH_PR_NUMBER//#/}"
+            cleaned_pr="${cleaned_pr//[[:space:]]/}"
+            if [[ -n "${cleaned_pr}" ]]; then
+              if ! [[ "${cleaned_pr}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Invalid pull request number '${DISPATCH_PR_NUMBER}'."
+                exit 1
+              fi
+              target_prs+=("${cleaned_pr}")
+              force_retest="true"
+            fi
+          fi
+
+          if [[ "${#target_prs[@]}" -eq 0 ]]; then
+            mapfile -t target_prs < <(
+              gh pr list --repo "${REPO_FULL_NAME}" --state open --base main --limit 50 \
+                --json number,author \
+                --jq '.[] | select((.author.login // "" | ascii_downcase) | IN("renovate-bot", "renovate[bot]", "app/renovate", "dependabot[bot]", "app/dependabot")) | .number'
+            )
+          fi
+
+          if [[ "${#target_prs[@]}" -eq 0 ]]; then
+            echo "No open Renovate/Dependabot pull requests targeting main found."
+            exit 0
+          fi
+
+          pr_json_file="$(mktemp)"
+          trap 'rm -f "${pr_json_file}"' EXIT
+
+          declare -a failed_prs=()
+
+          for pr_num in "${target_prs[@]}"; do
+            echo "=== Checking staging eligibility for PR #${pr_num} ==="
+            gh api graphql \
+              -F owner="${repo_owner}" \
+              -F name="${repo_name}" \
+              -F number="${pr_num}" \
+              -F query="@${CI_TRUSTED_DIR}/bot-pr-query.graphql" > "${pr_json_file}"
+
+            eval_json="$(
+              EVAL_MODE=staging \
+              REPO_FULL_NAME="${REPO_FULL_NAME}" \
+              FORCE_RETEST="${force_retest}" \
+              node "${CI_TRUSTED_DIR}/evaluate-bot-pr.mjs" "${pr_json_file}"
+            )"
+            echo "${eval_json}"
+
+            action="$(jq -r '.action' <<< "${eval_json}")"
+            if [[ "${action}" != "test" ]]; then
+              echo "Skipping GDC Staging test for PR #${pr_num} (action=${action})."
+              continue
+            fi
+
+            head_oid="$(jq -r '.headRefOid' <<< "${eval_json}")"
+            PR_NUMBER="${pr_num}"
+            PR_HEAD_SHA="${head_oid}"
+            PR_CHECK_RUN_ID=""
+            export PR_NUMBER PR_HEAD_SHA PR_CHECK_RUN_ID
+
+            start_pr_check_run "${CHECK_NAME}" "in_progress" "Running CAS KRM & gRPC integration suite on GDC Staging for approved dependency bot PR"
+
+            echo "=== Running GDC Staging CAS Integration Suite for PR #${pr_num} (${head_oid:0:7}) ==="
+            if ! bash "${CI_TRUSTED_DIR}/scripts/ci-integration-test.sh"; then
+              echo "::error::GDC Staging CAS integration test failed for PR #${pr_num} (${head_oid:0:7})."
+              failed_prs+=("${pr_num}")
+            fi
+
+            git merge --abort 2>/dev/null || true
+            git reset --hard --quiet
+            git checkout -f --detach origin/main
+            git clean -fd --quiet
+          done
+
+          if [[ "${#failed_prs[@]}" -gt 0 ]]; then
+            echo "::error::GDC Staging integration test failed for PR(s): ${failed_prs[*]}"
+            exit 1
+          fi
+
   auto-merge:
     name: Approve & Enable Auto-Merge
+    needs: certify-bot-prs
+    if: '!cancelled()'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,81 +249,8 @@ jobs:
             exit 0
           fi
 
-          query_file="$(mktemp)"
           pr_json_file="$(mktemp)"
-          trap 'rm -f "${query_file}" "${pr_json_file}"' EXIT
-
-          cat <<'GRAPHQL' > "${query_file}"
-          query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              pullRequest(number: $number) {
-                number
-                state
-                isDraft
-                baseRefName
-                headRefOid
-                title
-                body
-                author {
-                  __typename
-                  login
-                }
-                labels(first: 50) {
-                  nodes {
-                    name
-                  }
-                }
-                reviewThreads(first: 100) {
-                  pageInfo {
-                    hasNextPage
-                  }
-                  nodes {
-                    isResolved
-                  }
-                }
-                latestReviews(first: 50) {
-                  nodes {
-                    state
-                    author {
-                      login
-                    }
-                    commit {
-                      oid
-                    }
-                  }
-                }
-                commits(last: 1) {
-                  nodes {
-                    commit {
-                      statusCheckRollup {
-                        contexts(first: 100) {
-                          pageInfo {
-                            hasNextPage
-                          }
-                          nodes {
-                            __typename
-                            ... on CheckRun {
-                              name
-                              status
-                              conclusion
-                              startedAt
-                              completedAt
-                            }
-                            ... on StatusContext {
-                              context
-                              state
-                              createdAt
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          GRAPHQL
+          trap 'rm -f "${pr_json_file}"' EXIT
 
           for pr_num in "${target_prs[@]}"; do
             echo "=== Evaluating PR #${pr_num} ==="
@@ -186,9 +258,13 @@ jobs:
               -F owner="${repo_owner}" \
               -F name="${repo_name}" \
               -F number="${pr_num}" \
-              -F query="@${query_file}" > "${pr_json_file}"
+              -F query="@.github/scripts/bot-pr-query.graphql" > "${pr_json_file}"
 
-            eval_json="$(ALLOW_MAJOR="${allow_major}" node .github/scripts/evaluate-bot-pr.mjs "${pr_json_file}")"
+            eval_json="$(
+              REPO_FULL_NAME="${REPO_FULL_NAME}" \
+              ALLOW_MAJOR="${allow_major}" \
+              node .github/scripts/evaluate-bot-pr.mjs "${pr_json_file}"
+            )"
             echo "${eval_json}"
 
             action="$(jq -r '.action' <<< "${eval_json}")"
@@ -205,7 +281,7 @@ jobs:
 
             if [[ "${already_approved}" != "true" ]]; then
               gh pr review --approve "${pr_num}" --repo "${REPO_FULL_NAME}" \
-                --body "Auto-approved: all required checks passed with no unresolved review comments."
+                --body "Auto-approved: all required checks (including GDC Staging CAS integration test) passed with no unresolved review comments."
             else
               echo "PR #${pr_num} is already approved by github-actions[bot] on HEAD."
             fi

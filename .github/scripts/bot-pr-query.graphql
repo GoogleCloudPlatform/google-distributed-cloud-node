@@ -1,0 +1,75 @@
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      state
+      isDraft
+      baseRefName
+      headRefOid
+      title
+      body
+      author {
+        __typename
+        login
+      }
+      headRepository {
+        nameWithOwner
+      }
+      headRepositoryOwner {
+        login
+      }
+      labels(first: 50) {
+        nodes {
+          name
+        }
+      }
+      reviewThreads(first: 100) {
+        pageInfo {
+          hasNextPage
+        }
+        nodes {
+          isResolved
+        }
+      }
+      latestReviews(first: 50) {
+        nodes {
+          state
+          author {
+            login
+          }
+          commit {
+            oid
+          }
+        }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                pageInfo {
+                  hasNextPage
+                }
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                    startedAt
+                    completedAt
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

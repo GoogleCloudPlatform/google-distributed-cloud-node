@@ -95,6 +95,45 @@ is_authorized_maintainer() {
   return 1
 }
 
+is_authorized_dependency_bot() {
+  local actor="${1:-}"
+  if [[ -z "${actor}" ]]; then
+    return 1
+  fi
+
+  local actor_lc
+  actor_lc=$(printf '%s' "${actor}" | tr '[:upper:]' '[:lower:]')
+  case "${actor_lc}" in
+    renovate-bot|"renovate[bot]"|app/renovate|"dependabot[bot]"|app/dependabot)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+is_authorized_dependency_bot_fork() {
+  local head_repo="${1:-}"
+  local pr_user="${2:-}"
+
+  if ! is_authorized_dependency_bot "${pr_user}"; then
+    return 1
+  fi
+  if [[ -z "${head_repo}" || "${head_repo}" != */* ]]; then
+    return 1
+  fi
+
+  local head_owner_lc
+  head_owner_lc=$(printf '%s' "${head_repo%%/*}" | tr '[:upper:]' '[:lower:]')
+  case "${head_owner_lc}" in
+    renovate-bot|renovate|dependabot)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 should_skip_non_code_changes() {
   if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
     return 1
@@ -249,12 +288,19 @@ precheck_integration_trigger() {
     fi
 
     if [[ "${head_repo}" != "${GITHUB_REPOSITORY:-}" ]]; then
+      if is_authorized_dependency_bot_fork "${head_repo}" "${pr_user}"; then
+        echo "Authorized dependency bot fork PR (${pr_user} from ${head_repo}); GitHub Actions cannot expose gdc-staging secrets to fork pull_request runs."
+        echo "Deferring GDC Staging integration test to the trusted 'Renovate Auto-Merge' workflow on main."
+        [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "should_run=false" >> "${GITHUB_OUTPUT}"
+        return 0
+      fi
       echo "Skipping automatic GDC Staging integration test for forked PR (${head_repo})."
       echo "A maintainer listed in CODEOWNERS must review the diff and comment '/test-integration' on PR #${pr_number}."
       exit 1
     fi
 
-    if ! is_authorized_maintainer "${pr_user}" "${author_association}"; then
+    if ! is_authorized_maintainer "${pr_user}" "${author_association}" && \
+       ! is_authorized_dependency_bot "${pr_user}"; then
       echo "Skipping automatic GDC Staging integration test for untrusted author '${pr_user}'."
       echo "A maintainer must review the diff and comment '/test-integration' on PR #${pr_number}."
       exit 1

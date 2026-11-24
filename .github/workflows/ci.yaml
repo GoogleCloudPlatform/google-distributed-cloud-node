@@ -64,7 +64,7 @@ jobs:
           diff -u LICENSE cas/gdc-cas/LICENSE
           diff -u NOTICE cas/gdc-cas/NOTICE
 
-      - name: Check JavaScript syntax
+      - name: Check JavaScript and shell syntax
         run: |
           node --check cas/gdc-cas/index.js
           node --check cas/gdc-cas/cas-client.js
@@ -72,6 +72,7 @@ jobs:
           node --check cas/gdc-cas/proto/cas-json.js
           node --check cas/run-example.js
           node --check .github/scripts/evaluate-bot-pr.mjs
+          bash -n scripts/ci-common.sh scripts/ci-integration-test.sh
 
       - name: Check TypeScript declarations (cas-client.d.ts)
         working-directory: cas/gdc-cas
@@ -120,8 +121,10 @@ jobs:
         working-directory: cas/gdc-cas
         run: npm test
 
-      - name: Run bot PR evaluator unit tests
-        run: node --test .github/scripts/evaluate-bot-pr.test.mjs
+      - name: Run bot PR evaluator and CI helper unit tests
+        run: |
+          node --test .github/scripts/evaluate-bot-pr.test.mjs
+          node --test scripts/ci-common.test.mjs
 
   test-node24:
     name: Unit Tests (Node 24 LTS)
