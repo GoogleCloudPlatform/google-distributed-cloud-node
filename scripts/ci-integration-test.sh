@@ -47,27 +47,34 @@ if [[ -n "${PR_CHECK_RUN_ID:-}" ]]; then
   start_pr_check_run "${CHECK_NAME}" "in_progress" "Running CAS KRM & gRPC integration suite on GDC Staging"
 fi
 
-# When triggered via /test-integration or workflow_dispatch with pr_number, check out
-# the verified PR_HEAD_SHA and merge origin/main so we test the exact merge candidate.
+# When triggered via /test-integration, Renovate certification, or workflow_dispatch
+# with pr_number, check out the verified PR_HEAD_SHA and merge origin/main so we
+# test the exact merge candidate.
 if [[ -n "${PR_NUMBER:-}" && -n "${PR_HEAD_SHA:-}" ]]; then
+  git merge --abort 2>/dev/null || true
+  git reset --hard --quiet
   retry_with_backoff 3 2 git fetch origin main
-  retry_with_backoff 3 2 git fetch origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}"
-  actual_sha=$(git rev-parse "pr-${PR_NUMBER}")
+  retry_with_backoff 3 2 git fetch origin "+pull/${PR_NUMBER}/head:refs/remotes/origin/pr-${PR_NUMBER}"
+  actual_sha=$(git rev-parse "refs/remotes/origin/pr-${PR_NUMBER}")
   if [[ "${actual_sha}" != "${PR_HEAD_SHA}" ]]; then
-    echo "::error::PR #${PR_NUMBER} head moved from ${PR_HEAD_SHA:0:7} to ${actual_sha:0:7} before execution; re-run '/test-integration' after reviewing."
+    echo "::error::PR #${PR_NUMBER} head moved from ${PR_HEAD_SHA:0:7} to ${actual_sha:0:7} before execution; aborting."
     exit 1
   fi
-  git checkout -f "${PR_HEAD_SHA}"
+  git checkout -f --detach "${PR_HEAD_SHA}"
   git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
     merge --no-edit origin/main
 fi
 
 echo "=== Installing gdc-cas dependencies & packing release tarball ==="
 (
+  unset GDC_CAS_STAGING_SA_KEY GDC_CAS_STAGING_CA_CERT GH_TOKEN
   cd "${REPO_ROOT}/cas/gdc-cas"
   retry_with_backoff 3 2 npm ci --no-audit --no-fund
 )
-TARBALL_NAME=$(cd "${REPO_ROOT}/cas/gdc-cas" && npm pack --pack-destination "${PACK_DIR}" | tail -n 1)
+TARBALL_NAME=$(
+  unset GDC_CAS_STAGING_SA_KEY GDC_CAS_STAGING_CA_CERT GH_TOKEN
+  cd "${REPO_ROOT}/cas/gdc-cas" && npm pack --pack-destination "${PACK_DIR}" | tail -n 1
+)
 TARBALL_PATH="${PACK_DIR}/${TARBALL_NAME}"
 echo "Packed candidate tarball: ${TARBALL_PATH}"
 
@@ -82,6 +89,7 @@ EOF
 
 echo "=== Installing packed gdc-cas tarball into isolated consumer project ==="
 (
+  unset GDC_CAS_STAGING_SA_KEY GDC_CAS_STAGING_CA_CERT GH_TOKEN
   cd "${CONSUMER_DIR}"
   retry_with_backoff 3 2 npm install --no-audit --no-fund "${TARBALL_PATH}"
 )
