@@ -1,5 +1,9 @@
 # Google Distributed Cloud Air-gapped Node.js Client SDK (`google-distributed-cloud-node`)
 
+[![SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)
+[![CI](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml)
+[![Release Pipeline Dashboard](https://img.shields.io/badge/dashboard-GitHub%20Pages-0ea5e9)](https://googlecloudplatform.github.io/google-distributed-cloud-node/)
+
 `google-distributed-cloud-node` is the official Node.js client SDK for Google Distributed Cloud air-gapped (GDCag) services.
 
 ## Supported Services
@@ -19,7 +23,8 @@ This repository contains the client library modules and developer utilities desi
 google-distributed-cloud-node/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/       # Bug report and feature request templates
-│   └── PULL_REQUEST_TEMPLATE.md
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── workflows/            # CI, GDC Staging qualification & OSS Exit Gate release workflows
 ├── cas/
 │   ├── gdc-cas/              # The 'gdc-cas' npm package source
 │   │   ├── cas-client.js     # CAS client implementation (KRM & gRPC)
@@ -28,6 +33,11 @@ google-distributed-cloud-node/
 │   │   └── proto/            # Protocol buffer definitions & compiled descriptors
 │   ├── run-example.js        # CAS client example and QPS benchmark runner
 │   └── README.md             # Load testing guide and execution modes
+├── dashboard/                # Static GitHub Pages CI/CD & Release Pipeline Dashboard
+│   ├── index.html            # Live pipeline monitor UI & execution history viewer
+│   └── data/runs.json        # Recorded snapshot & official release run ledger
+├── scripts/
+│   └── release/              # SemVer resolution, GitHub API release notes & retry helpers
 ├── CODEOWNERS                # Repository code owners
 ├── CODE_OF_CONDUCT.md        # Contributor Code of Conduct
 ├── CONTRIBUTING.md           # Guidelines for contributing to this project
@@ -81,6 +91,59 @@ To interact with GDC air-gapped services using this SDK (currently CAS), you wil
 2. A service account key JSON file with appropriate permissions (e.g. `certificate-authority-service-admin` for CAS).
 3. The GDC trust store root certificate (`ca.crt`).
 4. An active Certificate Authority configured in your GDC namespace (for CAS usage).
+
+---
+
+## Monitoring & Release Pipeline Dashboard
+
+Continuous qualification and official SemVer npm releases are tracked through the GitHub Pages pipeline monitor and GitHub Actions summaries:
+
+* **Release Pipeline Dashboard ([`https://googlecloudplatform.github.io/google-distributed-cloud-node/`](https://googlecloudplatform.github.io/google-distributed-cloud-node/))**:
+  * **Live Active Run Polling**: Automatically polls in-progress, queued, and waiting GitHub Actions runs to display real-time stage-by-stage progress (`Authorize & SemVer` → `Release Notes` → `GDC Staging (KRM + gRPC)` → `Publish via OSS Exit Gate`) with a live elapsed timer.
+  * **KPI Overview & Registry Telemetry**: Displays total recorded runs, overall pass rate, latest certified `release` and `snapshot` versions, live `npmjs.org` published version, and 30-day npm download counts.
+  * **Filterable Execution History**: Tracks historical `snapshot` and `release` runs with package/mode/status filters, tested commit SHAs, trigger actors, stage badges, and expandable GitHub API release notes.
+* **GitHub Actions Job Summary**: Every pipeline execution publishes a structured summary table (and prepared release notes in `release` mode) under the workflow run's **Summary** tab.
+
+### Execution Modes (`snapshot` vs. `release`)
+
+The **[SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** supports two execution modes:
+
+* **`snapshot` Mode (Weeknight Qualification / Pre-Release)**:
+  * Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) and on manual `snapshot` dispatches.
+  * Resolves `<version>-snapshot.<short_sha>` from `cas/gdc-cas/package.json`, packs the candidate npm tarball, runs all unit, type, consumer smoke, and live GDC Air-gapped Staging integration tests (both KRM and direct gRPC), records telemetry on the dashboard, and **skips `npmjs.com` registry publication**.
+* **`release` Mode (Official SemVer Release)**:
+  * Triggered by repository maintainers listed in [`CODEOWNERS`](./CODEOWNERS) from `main`.
+  * Executes full GDC Air-gapped Staging qualification, prepares structured release notes via the GitHub REST API, publishes the certified tarball to `npmjs.com` via Google OSS Exit Gate (Workload Identity Federation), creates the `gdc-cas-v<version>` GitHub Release with SHA-512 integrity digest, and opens an automated post-release SemVer bump PR.
+
+### Triggering the Pipeline
+
+Maintainers can dispatch the workflow from **[Actions → SDK Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** on `main` or via the GitHub CLI (`gh`):
+
+| Input | Default | Description |
+| :--- | :--- | :--- |
+| `package` | `gdc-cas` | Target SDK package to qualify or release. |
+| `release_mode` | `snapshot` | Execution mode: `snapshot` (Staging qualification only, no npm publish) or `release` (official SemVer release + npm publish). |
+| `next_version` | `bump-patch` | Automated post-release SemVer bump PR operation (`bump-patch`, `bump-minor`, `bump-major`, or `noop`). |
+| `oss_exit_gate_project` | `gdc-node` | Google OSS Exit Gate project slug used during `release` publication. |
+
+```bash
+# Trigger a snapshot qualification run (runs all tests on GDC Staging without npm publish)
+gh workflow run release-pipeline.yaml \
+  --repo GoogleCloudPlatform/google-distributed-cloud-node \
+  --ref main \
+  -f package=gdc-cas \
+  -f release_mode=snapshot
+
+# Trigger an official SemVer release and open a patch-bump PR
+gh workflow run release-pipeline.yaml \
+  --repo GoogleCloudPlatform/google-distributed-cloud-node \
+  --ref main \
+  -f package=gdc-cas \
+  -f release_mode=release \
+  -f next_version=bump-patch
+```
+
+---
 
 ## Contributing
 
