@@ -276,7 +276,7 @@ jobs:
           path: /tmp/release-notes
 
       - name: Authenticate with Google OSS Exit Gate (Workload Identity Federation)
-        uses: google-github-actions/auth@7b53cdc2a387814ed14eec026287aac689ae8c9b # v2.1.9
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: 'projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github'
 
