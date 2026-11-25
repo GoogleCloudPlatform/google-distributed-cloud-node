@@ -36,16 +36,6 @@ on:
         options:
           - snapshot
           - release
-      next_version:
-        description: 'Automated post-release version bump PR operation (used when release_mode == release)'
-        required: false
-        default: 'bump-patch'
-        type: choice
-        options:
-          - bump-patch
-          - bump-minor
-          - bump-major
-          - noop
       oss_exit_gate_project:
         description: 'Google OSS Exit Gate project slug'
         required: false
@@ -123,8 +113,17 @@ jobs:
           pkg="${INPUT_PACKAGE:-gdc-cas}"
           echo "release_mode=${mode}" >> "${GITHUB_OUTPUT}"
 
-          PACKAGE_NAME="${pkg}" RELEASE_MODE="${mode}" COMMIT_SHA="${COMMIT_SHA}" \
-            node ./scripts/release/semver-helper.mjs resolve
+          plan_json="$(
+            PACKAGE_NAME="${pkg}" RELEASE_MODE="${mode}" COMMIT_SHA="${COMMIT_SHA}" \
+              node ./scripts/release/semver-helper.mjs resolve
+          )"
+          echo "${plan_json}"
+
+          if [[ "${mode}" == "release" ]]; then
+            target_version="$(jq -r '.version' <<< "${plan_json}")"
+            PACKAGE_NAME="${pkg}" TARGET_VERSION="${target_version}" \
+              node ./scripts/release/semver-helper.mjs check-npm
+          fi
 
   prepare-release-notes:
     name: Prepare Release Notes (GitHub API)
@@ -249,8 +248,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
-      pull-requests: write
       id-token: write
+    outputs:
+      tarball_sri: ${{ steps.publish.outputs.tarball_sri }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,6 +284,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Publish certified tarball to Artifact Registry & trigger OSS Exit Gate
+        id: publish
         env:
           EXIT_GATE_PROJECT: ${{ inputs.oss_exit_gate_project || 'gdc-node' }}
           NPM_DIST_TAG: ${{ needs.authorize.outputs.npm_dist_tag }}
@@ -305,6 +306,8 @@ jobs:
           chmod +x ./scripts/release/retry.sh
           ./scripts/release/retry.sh 3 3 npx --yes google-artifactregistry-auth --repo-config="${work_npmrc}" --credential-config="${work_npmrc}"
           tarball_file="$(ls /tmp/certified-tarball/*.tgz | head -n 1)"
+          tarball_sri="sha512-$(openssl dgst -sha512 -binary "${tarball_file}" | openssl base64 -A)"
+          echo "tarball_sri=${tarball_sri}" >> "${GITHUB_OUTPUT}"
           ./scripts/release/retry.sh 3 3 npm publish "${tarball_file}" --userconfig "${work_npmrc}" --tag "${NPM_DIST_TAG}"
           rm -f "${work_npmrc}"
 
@@ -313,19 +316,14 @@ jobs:
           ./scripts/release/retry.sh 4 2 gcloud storage cp "${manifest_file}" "gs://oss-exit-gate-prod-projects-bucket/${EXIT_GATE_PROJECT}/npm/manifests/manifest.json"
           echo "Uploaded manifest to GCS; Google OSS Exit Gate publication to npmjs.com triggered."
 
-      - name: Create GitHub Release with prepared notes & open SemVer bump PR
+      - name: Create GitHub Release with prepared notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
-          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
-          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           REPO_SLUG: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PKG_NAME: ${{ needs.authorize.outputs.package_name }}
-          PKG_DIR: ${{ needs.authorize.outputs.package_dir }}
           PKG_VERSION: ${{ needs.authorize.outputs.version }}
           GIT_TAG: ${{ needs.authorize.outputs.git_tag }}
-          NEXT_VERSION_OP: ${{ inputs.next_version || 'bump-patch' }}
         run: |
           set -euo pipefail
           chmod +x ./scripts/release/retry.sh
@@ -349,42 +347,47 @@ jobs:
           fi
           echo "Published GitHub Release ${GIT_TAG} (SHA-512: ${sha512_hex})."
 
-          if [[ "${NEXT_VERSION_OP}" != "noop" ]]; then
-            next_ver="$(CURRENT_VERSION="${PKG_VERSION}" NEXT_VERSION_OP="${NEXT_VERSION_OP}" node ./scripts/release/semver-helper.mjs bump)"
-            bump_branch="chore/bump-${PKG_NAME}-v${next_ver}"
-            bump_token="${GH_TOKEN}"
-            bump_author_name="github-actions[bot]"
-            bump_author_email="41898282+github-actions[bot]@users.noreply.github.com"
-            pr_body="Automated post-release SemVer bump following \`${GIT_TAG}\`."
-            if [[ -n "${RELEASE_BOT_TOKEN:-}" ]]; then
-              bump_token="${RELEASE_BOT_TOKEN}"
-              bump_author_name="${RELEASE_BOT_NAME:-gdc-node-release-bot}"
-              bump_author_email="${RELEASE_BOT_EMAIL:-gdc-node-release-bot@google.com}"
-            else
-              pr_body="${pr_body}"$'\n\n'"> **Note:** Opened with \`GITHUB_TOKEN\` (\`github-actions[bot]\`), which does not satisfy \`cla/google\` and does not trigger \`pull_request\` CI workflows. Configure a CLA-registered robot token (\`RELEASE_BOT_TOKEN\`, \`RELEASE_BOT_NAME\`, \`RELEASE_BOT_EMAIL\`) or replace this PR with a maintainer commit."
-            fi
+  verify-npm-release:
+    name: Verify Published npm Package on GDC Staging
+    needs: [authorize, publish-npm]
+    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true' && needs.publish-npm.result == 'success'
+    runs-on: ubuntu-latest
+    environment: gdc-staging
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-            git config user.name "${bump_author_name}"
-            git config user.email "${bump_author_email}"
-            git checkout -B "${bump_branch}" "${COMMIT_SHA}"
-            (
-              cd "${PKG_DIR}"
-              npm version "${next_ver}" --no-git-tag-version
-            )
-            git add "${PKG_DIR}/package.json" "${PKG_DIR}/package-lock.json"
-            git commit -s -m "chore(${PKG_NAME}): bump version to ${next_ver}"
-            ./scripts/release/retry.sh 3 2 git push -f "https://x-access-token:${bump_token}@github.com/${REPO_SLUG}.git" "${bump_branch}"
-            GH_TOKEN="${bump_token}" ./scripts/release/retry.sh 3 2 gh pr create \
-              --repo "${REPO_SLUG}" \
-              --base main \
-              --head "${bump_branch}" \
-              --title "chore(${PKG_NAME}): bump version to ${next_ver}" \
-              --body "${pr_body}" || true
-          fi
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Install published npm package & run GDC Staging integration suite
+        env:
+          PKG_NAME: ${{ needs.authorize.outputs.package_name }}
+          PKG_VERSION: ${{ needs.authorize.outputs.version }}
+          NPM_DIST_TAG: ${{ needs.authorize.outputs.npm_dist_tag }}
+          EXPECTED_TARBALL_SRI: ${{ needs.publish-npm.outputs.tarball_sri }}
+          GDC_CAS_STAGING_SA_KEY: ${{ secrets.GDC_CAS_STAGING_SA_KEY }}
+          GDC_CAS_STAGING_CA_CERT: ${{ secrets.GDC_CAS_STAGING_CA_CERT }}
+          GDC_ORG: ${{ secrets.GDC_ORG || vars.GDC_ORG }}
+          GDC_ZONE: ${{ secrets.GDC_ZONE || vars.GDC_ZONE }}
+          GDC_LAB_URL: ${{ secrets.GDC_LAB_URL || vars.GDC_LAB_URL }}
+          GDC_CAS_PROJECT: ${{ secrets.GDC_CAS_PROJECT || vars.GDC_CAS_PROJECT }}
+          GDC_CAS_CA_NAME: ${{ secrets.GDC_CAS_CA_NAME || vars.GDC_CAS_CA_NAME }}
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/release/verify-npm-release.sh
+          ./scripts/release/verify-npm-release.sh
 
   update-dashboard:
     name: Record Run Telemetry & Upload Pages Artifact
-    needs: [authorize, prepare-release-notes, certify-staging, publish-npm]
+    needs: [authorize, prepare-release-notes, certify-staging, publish-npm, verify-npm-release]
     if: always() && github.ref == 'refs/heads/main' && (needs.authorize.result == 'success' || needs.authorize.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
@@ -427,6 +430,7 @@ jobs:
           STAGE_NOTES: ${{ needs.prepare-release-notes.result }}
           STAGE_STAGING: ${{ needs.certify-staging.result }}
           STAGE_PUBLISH: ${{ needs.publish-npm.result }}
+          STAGE_VERIFY_NPM: ${{ needs.verify-npm-release.result }}
         run: |
           set -euo pipefail
           now_epoch="$(date -u +%s)"
@@ -437,9 +441,9 @@ jobs:
           fi
 
           overall="success"
-          if [[ "${STAGE_AUTHORIZE}" == "failure" || "${STAGE_NOTES}" == "failure" || "${STAGE_STAGING}" == "failure" || "${STAGE_PUBLISH}" == "failure" ]]; then
+          if [[ "${STAGE_AUTHORIZE}" == "failure" || "${STAGE_NOTES}" == "failure" || "${STAGE_STAGING}" == "failure" || "${STAGE_PUBLISH}" == "failure" || "${STAGE_VERIFY_NPM}" == "failure" ]]; then
             overall="failure"
-          elif [[ "${STAGE_AUTHORIZE}" == "cancelled" || "${STAGE_NOTES}" == "cancelled" || "${STAGE_STAGING}" == "cancelled" || "${STAGE_PUBLISH}" == "cancelled" ]]; then
+          elif [[ "${STAGE_AUTHORIZE}" == "cancelled" || "${STAGE_NOTES}" == "cancelled" || "${STAGE_STAGING}" == "cancelled" || "${STAGE_PUBLISH}" == "cancelled" || "${STAGE_VERIFY_NPM}" == "cancelled" ]]; then
             overall="cancelled"
           fi
 
@@ -453,7 +457,7 @@ jobs:
             echo "| **Version / Tag** | \`${PACKAGE_VERSION}\` (\`${GIT_TAG}\`) |"
             echo "| **Commit** | \`${COMMIT_SHA:0:7}\` |"
             echo "| **Overall Status** | \`${overall}\` (${duration_str}) |"
-            echo "| **Stages (Auth / Notes / Staging / Publish)** | \`${STAGE_AUTHORIZE}\` / \`${STAGE_NOTES}\` / \`${STAGE_STAGING}\` / \`${STAGE_PUBLISH}\` |"
+            echo "| **Stages (Auth / Notes / Staging / Publish / Verify npm)** | \`${STAGE_AUTHORIZE}\` / \`${STAGE_NOTES}\` / \`${STAGE_STAGING}\` / \`${STAGE_PUBLISH}\` / \`${STAGE_VERIFY_NPM}\` |"
             echo "| **Release Dashboard** | https://googlecloudplatform.github.io/google-distributed-cloud-node/ |"
           } >> "${GITHUB_STEP_SUMMARY}"
 

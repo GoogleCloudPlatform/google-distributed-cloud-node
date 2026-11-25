@@ -299,8 +299,14 @@ precheck_integration_trigger() {
       exit 1
     fi
 
-    if ! is_authorized_maintainer "${pr_user}" "${author_association}" && \
-       ! is_authorized_dependency_bot "${pr_user}"; then
+    if is_authorized_dependency_bot "${pr_user}"; then
+      echo "Authorized dependency bot PR (${pr_user}); GitHub Actions withholds gdc-staging environment secrets on dependabot[bot] pull_request runs."
+      echo "Deferring GDC Staging integration test to the trusted 'Renovate Auto-Merge' workflow on main."
+      [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "should_run=false" >> "${GITHUB_OUTPUT}"
+      return 0
+    fi
+
+    if ! is_authorized_maintainer "${pr_user}" "${author_association}"; then
       echo "Skipping automatic GDC Staging integration test for untrusted author '${pr_user}'."
       echo "A maintainer must review the diff and comment '/test-integration' on PR #${pr_number}."
       exit 1

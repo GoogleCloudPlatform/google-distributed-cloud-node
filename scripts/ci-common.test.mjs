@@ -103,9 +103,9 @@ describe('scripts/ci-common.sh authorization & security helpers', () => {
     assert.match(output, /^should_run=false$/m);
   });
 
-  it('allows same-repo pull requests authored by renovate[bot] or dependabot[bot]', () => {
+  it('defers same-repo dependency bot PRs (dependabot[bot], renovate[bot]) cleanly without failing precheck', () => {
     for (const botLogin of ['renovate[bot]', 'dependabot[bot]', 'renovate-bot']) {
-      const { output } = runPrecheckWithEvent('pull_request', {
+      const { stdout, output } = runPrecheckWithEvent('pull_request', {
         pull_request: {
           number: 42,
           author_association: 'NONE',
@@ -116,7 +116,8 @@ describe('scripts/ci-common.sh authorization & security helpers', () => {
           },
         },
       });
-      assert.match(output, /^should_run=true$/m);
+      assert.match(stdout, /Deferring GDC Staging integration test/);
+      assert.match(output, /^should_run=false$/m);
     }
   });
 
