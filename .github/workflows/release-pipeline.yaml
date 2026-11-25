@@ -316,6 +316,9 @@ jobs:
       - name: Create GitHub Release with prepared notes & open SemVer bump PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           REPO_SLUG: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PKG_NAME: ${{ needs.authorize.outputs.package_name }}
@@ -349,36 +352,44 @@ jobs:
           if [[ "${NEXT_VERSION_OP}" != "noop" ]]; then
             next_ver="$(CURRENT_VERSION="${PKG_VERSION}" NEXT_VERSION_OP="${NEXT_VERSION_OP}" node ./scripts/release/semver-helper.mjs bump)"
             bump_branch="chore/bump-${PKG_NAME}-v${next_ver}"
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            bump_token="${GH_TOKEN}"
+            bump_author_name="github-actions[bot]"
+            bump_author_email="41898282+github-actions[bot]@users.noreply.github.com"
+            pr_body="Automated post-release SemVer bump following \`${GIT_TAG}\`."
+            if [[ -n "${RELEASE_BOT_TOKEN:-}" ]]; then
+              bump_token="${RELEASE_BOT_TOKEN}"
+              bump_author_name="${RELEASE_BOT_NAME:-gdc-node-release-bot}"
+              bump_author_email="${RELEASE_BOT_EMAIL:-gdc-node-release-bot@google.com}"
+            else
+              pr_body="${pr_body}"$'\n\n'"> **Note:** Opened with \`GITHUB_TOKEN\` (\`github-actions[bot]\`), which does not satisfy \`cla/google\` and does not trigger \`pull_request\` CI workflows. Configure a CLA-registered robot token (\`RELEASE_BOT_TOKEN\`, \`RELEASE_BOT_NAME\`, \`RELEASE_BOT_EMAIL\`) or replace this PR with a maintainer commit."
+            fi
+
+            git config user.name "${bump_author_name}"
+            git config user.email "${bump_author_email}"
             git checkout -B "${bump_branch}" "${COMMIT_SHA}"
             (
               cd "${PKG_DIR}"
               npm version "${next_ver}" --no-git-tag-version
             )
             git add "${PKG_DIR}/package.json" "${PKG_DIR}/package-lock.json"
-            git commit -m "chore(${PKG_NAME}): bump version to ${next_ver}"
-            ./scripts/release/retry.sh 3 2 git push -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO_SLUG}.git" "${bump_branch}"
-            ./scripts/release/retry.sh 3 2 gh pr create \
+            git commit -s -m "chore(${PKG_NAME}): bump version to ${next_ver}"
+            ./scripts/release/retry.sh 3 2 git push -f "https://x-access-token:${bump_token}@github.com/${REPO_SLUG}.git" "${bump_branch}"
+            GH_TOKEN="${bump_token}" ./scripts/release/retry.sh 3 2 gh pr create \
               --repo "${REPO_SLUG}" \
               --base main \
               --head "${bump_branch}" \
               --title "chore(${PKG_NAME}): bump version to ${next_ver}" \
-              --body "Automated post-release SemVer bump following \`${GIT_TAG}\`." || true
+              --body "${pr_body}" || true
           fi
 
   update-dashboard:
-    name: Update Release Dashboard (GitHub Pages)
+    name: Record Run Telemetry & Upload Pages Artifact
     needs: [authorize, prepare-release-notes, certify-staging, publish-npm]
     if: always() && github.ref == 'refs/heads/main' && (needs.authorize.result == 'success' || needs.authorize.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      pages: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -472,6 +483,7 @@ jobs:
           RELEASE_URL="${release_url}" \
           node ./scripts/release/semver-helper.mjs append-run "${pages_dir}/data/runs.json"
 
+          mkdir -p ./dashboard/data
           cp "${pages_dir}/data/runs.json" ./dashboard/data/runs.json
 
           git -C "${pages_dir}" config user.name "github-actions[bot]"
@@ -497,6 +509,38 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./dashboard
+
+  deploy-dashboard:
+    name: Deploy Release Dashboard (GitHub Pages)
+    needs: [update-dashboard]
+    if: always() && needs.update-dashboard.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Wait for github-pages artifact to be indexed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_SLUG: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            count="$(gh api "repos/${REPO_SLUG}/actions/runs/${RUN_ID}/artifacts?name=github-pages" --jq '.total_count' 2>/dev/null || echo 0)"
+            if [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge 1 ]]; then
+              echo "github-pages artifact indexed (count=${count}) on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Waiting for github-pages artifact to appear in GitHub API (attempt ${attempt}/20)..."
+            sleep 3
+          done
+          echo "::error::Timed out waiting for github-pages artifact to appear in GitHub API."
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
