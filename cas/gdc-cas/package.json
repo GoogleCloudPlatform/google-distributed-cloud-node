@@ -1,6 +1,6 @@
 {
   "name": "gdc-cas",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Node.js client library for Google Distributed Cloud air-gapped Certificate Authority Service (CAS)",
   "main": "index.js",
   "type": "module",
