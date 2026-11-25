@@ -23,6 +23,8 @@ import {
   parseSemVer,
   compareSemVer,
   computeNextVersion,
+  isBiweeklyReleaseWeek,
+  hasSubstantivePackageChanges,
   resolveReleasePlan,
   generateReleaseNotesViaGitHubApi,
   verifyVersionHigherThanNpm,
@@ -288,6 +290,218 @@ describe('semver-helper', () => {
     });
     assert.equal(attempts, 2);
     assert.equal(retried.ok, true);
+  });
+
+  it('evaluates strict 14-day biweekly release week parity across year boundaries', () => {
+    // 2026-11-23 (v0.1.0 release Monday) -> even epoch week (release week)
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-11-23T12:00:00Z')).isReleaseWeek, true);
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-11-30T12:00:00Z')).isReleaseWeek, false);
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-12-07T12:00:00Z')).isReleaseWeek, true);
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-12-14T12:00:00Z')).isReleaseWeek, false);
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-12-21T12:00:00Z')).isReleaseWeek, true);
+    assert.equal(isBiweeklyReleaseWeek(new Date('2026-12-28T12:00:00Z')).isReleaseWeek, false);
+    // Crosses 53-week ISO year 2026 into 2027 without cadence drift
+    assert.equal(isBiweeklyReleaseWeek(new Date('2027-01-04T12:00:00Z')).isReleaseWeek, true);
+    assert.throws(() => isBiweeklyReleaseWeek('not-a-date'), /Invalid date value/);
+  });
+
+  it('skips scheduled biweekly releases cleanly when unchanged or version is not bumped', () => {
+    const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'semver-biweekly-'));
+    try {
+      const pkgDir = path.join(tmpRepo, 'cas', 'gdc-cas');
+      fs.mkdirSync(pkgDir, { recursive: true });
+      const initPkg = { name: 'gdc-cas', version: '0.1.0', dependencies: { axios: '^1.9.0' } };
+      const initLock = {
+        name: 'gdc-cas',
+        version: '0.1.0',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'gdc-cas', version: '0.1.0', dependencies: { axios: '^1.9.0' } },
+          'node_modules/axios': { version: '1.9.0' },
+        },
+      };
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(initPkg, null, 2));
+      fs.writeFileSync(path.join(pkgDir, 'package-lock.json'), JSON.stringify(initLock, null, 2));
+      fs.writeFileSync(path.join(pkgDir, 'index.js'), 'export const v = 1;\n');
+      fs.writeFileSync(path.join(tmpRepo, 'README.md'), '# Root\n');
+
+      const git = (...args) => execFileSync('git', args, { cwd: tmpRepo, stdio: 'pipe' });
+      git('init', '-q');
+      git('config', 'user.name', 'Test');
+      git('config', 'user.email', 'test@example.com');
+      git('config', 'commit.gpgsign', 'false');
+      git('config', 'tag.gpgSign', 'false');
+      git('add', '.');
+      git('commit', '-q', '-m', 'initial 0.1.0');
+      git('tag', '-a', 'gdc-cas-v0.1.0', '-m', 'Release gdc-cas-v0.1.0');
+
+      // 1. Zero changes since last tag -> skip cleanly (not throw).
+      assert.equal(
+        hasSubstantivePackageChanges({ repoRoot: tmpRepo, lastTag: 'gdc-cas-v0.1.0', packageDir: 'cas/gdc-cas' }),
+        false
+      );
+      const noDiffPlan = resolveReleasePlan({
+        packageName: 'gdc-cas',
+        releaseMode: 'release',
+        repoRoot: tmpRepo,
+        allowSkipWhenUnchanged: true,
+      });
+      assert.equal(noDiffPlan.shouldRun, false);
+      assert.equal(noDiffPlan.needsPublish, false);
+      assert.match(noDiffPlan.skipReason, /No substantive changes/);
+
+      // 2. Non-package change (root README.md) -> still skip cleanly.
+      fs.writeFileSync(path.join(tmpRepo, 'README.md'), '# Updated Root\n');
+      git('add', '.');
+      git('commit', '-q', '-m', 'docs: update root readme');
+      const nonPkgPlan = resolveReleasePlan({
+        packageName: 'gdc-cas',
+        releaseMode: 'release',
+        repoRoot: tmpRepo,
+        allowSkipWhenUnchanged: true,
+      });
+      assert.equal(nonPkgPlan.shouldRun, false);
+      assert.equal(nonPkgPlan.needsPublish, false);
+
+      // 3. Version-only bump in package.json + package-lock.json with zero other changes -> skip cleanly.
+      const bumpedOnlyPkg = { ...initPkg, version: '0.1.1' };
+      const bumpedOnlyLock = {
+        ...initLock,
+        version: '0.1.1',
+        packages: {
+          ...initLock.packages,
+          '': { ...initLock.packages[''], version: '0.1.1' },
+        },
+      };
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(bumpedOnlyPkg, null, 2));
+      fs.writeFileSync(path.join(pkgDir, 'package-lock.json'), JSON.stringify(bumpedOnlyLock, null, 2));
+      git('add', '.');
+      git('commit', '-q', '-m', 'chore(gdc-cas): pre-stage 0.1.1 version');
+      assert.equal(
+        hasSubstantivePackageChanges({ repoRoot: tmpRepo, lastTag: 'gdc-cas-v0.1.0', packageDir: 'cas/gdc-cas' }),
+        false
+      );
+      const versionOnlyPlan = resolveReleasePlan({
+        packageName: 'gdc-cas',
+        releaseMode: 'release',
+        repoRoot: tmpRepo,
+        allowSkipWhenUnchanged: true,
+      });
+      assert.equal(versionOnlyPlan.shouldRun, false);
+      assert.equal(versionOnlyPlan.needsPublish, false);
+      assert.match(versionOnlyPlan.skipReason, /No substantive changes/);
+
+      // 4. Dependency update in package-lock.json while version stays 0.1.0 (already tagged) -> skip cleanly with reminder.
+      const depUpdatedLock = {
+        ...initLock,
+        packages: {
+          ...initLock.packages,
+          'node_modules/axios': { version: '1.9.1' },
+        },
+      };
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(initPkg, null, 2));
+      fs.writeFileSync(path.join(pkgDir, 'package-lock.json'), JSON.stringify(depUpdatedLock, null, 2));
+      git('add', '.');
+      git('commit', '-q', '-m', 'chore(deps): bump axios to 1.9.1');
+      assert.equal(
+        hasSubstantivePackageChanges({ repoRoot: tmpRepo, lastTag: 'gdc-cas-v0.1.0', packageDir: 'cas/gdc-cas' }),
+        true
+      );
+      const unbumpedPlan = resolveReleasePlan({
+        packageName: 'gdc-cas',
+        releaseMode: 'release',
+        repoRoot: tmpRepo,
+        allowSkipWhenUnchanged: true,
+      });
+      assert.equal(unbumpedPlan.shouldRun, false);
+      assert.equal(unbumpedPlan.needsPublish, false);
+      assert.match(unbumpedPlan.skipReason, /already tagged.*bump package\.json/);
+
+      // 5. Substantive change + bumped version (0.1.1) -> promote!
+      const readyPkg = { ...initPkg, version: '0.1.1' };
+      const readyLock = {
+        ...depUpdatedLock,
+        version: '0.1.1',
+        packages: {
+          ...depUpdatedLock.packages,
+          '': { ...depUpdatedLock.packages[''], version: '0.1.1' },
+        },
+      };
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(readyPkg, null, 2));
+      fs.writeFileSync(path.join(pkgDir, 'package-lock.json'), JSON.stringify(readyLock, null, 2));
+      git('add', '.');
+      git('commit', '-q', '-m', 'chore(gdc-cas): bump version to 0.1.1');
+      const readyPlan = resolveReleasePlan({
+        packageName: 'gdc-cas',
+        releaseMode: 'release',
+        repoRoot: tmpRepo,
+        allowSkipWhenUnchanged: true,
+      });
+      assert.equal(readyPlan.shouldRun, true);
+      assert.equal(readyPlan.needsPublish, true);
+      assert.equal(readyPlan.version, '0.1.1');
+      assert.equal(readyPlan.gitTag, 'gdc-cas-v0.1.1');
+
+      // 6. Prerelease version in package.json still fails fast even in scheduled mode.
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ ...initPkg, version: '0.1.1-dev' }));
+      assert.throws(
+        () =>
+          resolveReleasePlan({
+            packageName: 'gdc-cas',
+            releaseMode: 'release',
+            repoRoot: tmpRepo,
+            allowSkipWhenUnchanged: true,
+          }),
+        /Official release mode requires a clean X\.Y\.Z version/
+      );
+    } finally {
+      fs.rmSync(tmpRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('skips already-published equal version on scheduled npm check but still rejects downgrades', async () => {
+    const makeRegistry = (latest, versions) => async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        name: 'gdc-cas',
+        'dist-tags': { latest },
+        versions: Object.fromEntries(versions.map((v) => [v, { version: v }])),
+      }),
+    });
+
+    // Equal to highest published -> skip cleanly in scheduled mode.
+    const eqRes = await verifyVersionHigherThanNpm({
+      packageName: 'gdc-cas',
+      targetVersion: '0.1.0',
+      allowSkipWhenAlreadyPublished: true,
+      fetchImpl: makeRegistry('0.1.0', ['0.0.0-stage', '0.1.0']),
+    });
+    assert.equal(eqRes.ok, true);
+    assert.equal(eqRes.skipped, true);
+    assert.match(eqRes.skipReason, /already published on npmjs\.com/);
+
+    // Strictly higher -> proceed in scheduled mode.
+    const hiRes = await verifyVersionHigherThanNpm({
+      packageName: 'gdc-cas',
+      targetVersion: '0.1.1',
+      allowSkipWhenAlreadyPublished: true,
+      fetchImpl: makeRegistry('0.1.0', ['0.0.0-stage', '0.1.0']),
+    });
+    assert.equal(hiRes.ok, true);
+    assert.equal(hiRes.skipped, false);
+
+    // Strictly lower -> still fail even in scheduled mode (accidental downgrade).
+    await assert.rejects(
+      () =>
+        verifyVersionHigherThanNpm({
+          packageName: 'gdc-cas',
+          targetVersion: '0.1.0',
+          allowSkipWhenAlreadyPublished: true,
+          fetchImpl: makeRegistry('0.2.0', ['0.1.0', '0.2.0']),
+        }),
+      /must be strictly higher than what is published on npmjs\.com/
+    );
   });
 
   it('deduplicates and prepends runs with releaseNotes in runs.json', () => {

@@ -1,7 +1,7 @@
 # Google Distributed Cloud Air-gapped Node.js Client SDK (`google-distributed-cloud-node`)
 
 [![gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)
-[![CI](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yml)
+[![CI](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yaml/badge.svg)](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/ci.yaml)
 [![Release Pipeline Dashboard](https://img.shields.io/badge/dashboard-GitHub%20Pages-0ea5e9)](https://googlecloudplatform.github.io/google-distributed-cloud-node/)
 
 `google-distributed-cloud-node` is the official Node.js client SDK for Google Distributed Cloud air-gapped (GDCag) services.
@@ -111,9 +111,12 @@ The **[gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloud
 * **`snapshot` Mode (Weeknight Qualification / Pre-Release)**:
   * Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) and on manual `snapshot` dispatches.
   * Resolves `<next-version>-snapshot.<short_sha>` (auto-incrementing the patch component when the `package.json` version is already tagged), packs the candidate npm tarball, runs all unit, type, consumer smoke, and live GDC Air-gapped Staging integration tests (both KRM and direct gRPC), records telemetry on the dashboard, and **skips `npmjs.com` registry publication**.
-* **`release` Mode (Official SemVer Release)**:
-  * **Step 1 (Pre-release version bump PR):** Open and merge a PR bumping `cas/gdc-cas/package.json` (and `package-lock.json`, plus `CHANGELOG.md` if applicable) to the target SemVer version (`patch`, `minor`, or `major`).
-  * **Step 2 (Dispatch release):** Triggered by repository maintainers listed in [`CODEOWNERS`](./CODEOWNERS) from `main`. Verifies the `package.json` version is not already tagged in Git and is **strictly higher (SemVer 2.0)** than what is currently published on `npmjs.com`, executes full GDC Air-gapped Staging qualification, prepares structured release notes via the GitHub REST API, publishes the certified tarball to `npmjs.com` via Google OSS Exit Gate (Workload Identity Federation), creates the `gdc-cas-v<version>` GitHub Release with SHA-512 integrity digest, and then **installs the newly published package directly from `registry.npmjs.org` to run a post-publish end-to-end verification (UC1–UC6) against GDC Air-gapped Staging**.
+* **`release` Mode (Official SemVer Release — Biweekly Automated Promotion & Manual Dispatch)**:
+  * **Step 1 (Pre-release version bump PR):** Developers keep the next target SemVer version (`patch`, `minor`, or `major`) ready in `cas/gdc-cas/package.json` (and `package-lock.json`, plus `CHANGELOG.md` if applicable) once changes are merged for release.
+  * **Step 2 (Automated biweekly promotion or manual dispatch):**
+    * **Scheduled biweekly promotion:** Runs automatically **every other Monday at `04:00 PST` / `12:00 UTC`** on `main` (enforcing strict 14-day epoch-week parity). If there are no substantive package changes in `cas/gdc-cas` since the last release tag (ignoring version-only manifest edits) or `package.json` still matches the already-tagged/published version, promotion is **skipped cleanly** instead of failing.
+    * **Manual dispatch:** Repository maintainers listed in [`CODEOWNERS`](./CODEOWNERS) can also trigger `release_mode=release` on demand from `main` (strictly failing if the version is already tagged or not strictly higher than `npmjs.com`).
+  * When promoting, the pipeline executes full GDC Air-gapped Staging qualification, prepares structured release notes via the GitHub REST API, publishes the certified tarball to `npmjs.com` via Google OSS Exit Gate (Workload Identity Federation), creates the `gdc-cas-v<version>` GitHub Release with SHA-512 integrity digest, and then **installs the newly published package directly from `registry.npmjs.org` to run a post-publish end-to-end verification (UC1–UC6) against GDC Air-gapped Staging**.
 
 ### Triggering the Pipeline
 

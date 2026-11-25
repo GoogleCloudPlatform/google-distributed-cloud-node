@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export const PACKAGE_REGISTRY = {
   'gdc-cas': {
@@ -32,6 +33,23 @@ export const PACKAGE_REGISTRY = {
 };
 
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
+// First UTC Monday after Unix epoch (1970-01-05T00:00:00Z).
+// Anchoring biweekly parity to epoch weeks guarantees exact 14-day intervals
+// across year boundaries (including 53-week ISO years such as 2026).
+// 2026-11-23 (gdc-cas-v0.1.0 release Monday) has weekIndex=2968 (even),
+// so subsequent biweekly release Mondays fall on 2026-12-07, 2026-12-21, 2027-01-04, etc.
+const BIWEEKLY_MONDAY_ANCHOR_MS = Date.UTC(1970, 0, 5, 0, 0, 0);
+
+export function isBiweeklyReleaseWeek(now = new Date()) {
+  const ms = now instanceof Date ? now.getTime() : Date.parse(String(now));
+  if (!Number.isFinite(ms)) {
+    throw new Error(`Invalid date value '${now}' for biweekly release check.`);
+  }
+  const weekIndex = Math.floor((ms - BIWEEKLY_MONDAY_ANCHOR_MS) / MS_PER_WEEK);
+  const isReleaseWeek = ((weekIndex % 2) + 2) % 2 === 0;
+  return { isReleaseWeek, weekIndex };
+}
 
 export function parseSemVer(version) {
   const match = String(version || '').trim().match(SEMVER_RE);
@@ -96,7 +114,89 @@ export function computeNextVersion(currentVersion, bumpOp) {
   }
 }
 
-export function resolveReleasePlan({ packageName, releaseMode, repoRoot = process.cwd(), commitSha = '' }) {
+function stripOwnVersionFromManifest(relPath, pkgDirNorm, rawJson) {
+  const parsed = JSON.parse(rawJson);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return parsed;
+  }
+  if (relPath === `${pkgDirNorm}/package.json`) {
+    delete parsed.version;
+  } else if (relPath === `${pkgDirNorm}/package-lock.json`) {
+    delete parsed.version;
+    if (parsed.packages && typeof parsed.packages === 'object' && parsed.packages[''] && typeof parsed.packages[''] === 'object') {
+      delete parsed.packages[''].version;
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Returns true if `packageDir` has substantive changes between `lastTag` and `HEAD`
+ * (ignoring changes that ONLY alter the package's own `version` string in
+ * `package.json` and `package-lock.json`).
+ */
+export function hasSubstantivePackageChanges({ repoRoot = process.cwd(), lastTag = '', packageDir }) {
+  if (!lastTag) {
+    return true;
+  }
+
+  const pkgDirNorm = String(packageDir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  let diffOutput = '';
+  try {
+    diffOutput = execFileSync(
+      'git',
+      ['diff', '--name-only', `${lastTag}..HEAD`, '--', pkgDirNorm],
+      { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
+  } catch {
+    return true;
+  }
+
+  if (!diffOutput) {
+    return false;
+  }
+
+  const changedFiles = diffOutput
+    .split(/\r?\n/)
+    .map((f) => f.trim().replace(/\\/g, '/'))
+    .filter(Boolean);
+
+  const manifestPaths = new Set([`${pkgDirNorm}/package.json`, `${pkgDirNorm}/package-lock.json`]);
+  for (const relPath of changedFiles) {
+    if (!manifestPaths.has(relPath)) {
+      return true;
+    }
+    try {
+      const oldRaw = execFileSync('git', ['show', `${lastTag}:${relPath}`], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const newRaw = execFileSync('git', ['show', `HEAD:${relPath}`], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const oldStripped = stripOwnVersionFromManifest(relPath, pkgDirNorm, oldRaw);
+      const newStripped = stripOwnVersionFromManifest(relPath, pkgDirNorm, newRaw);
+      if (!isDeepStrictEqual(oldStripped, newStripped)) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function resolveReleasePlan({
+  packageName,
+  releaseMode,
+  repoRoot = process.cwd(),
+  commitSha = '',
+  allowSkipWhenUnchanged = false,
+}) {
   const pkgMeta = PACKAGE_REGISTRY[packageName];
   if (!pkgMeta) {
     throw new Error(`Unknown package '${packageName}'. Supported: ${Object.keys(PACKAGE_REGISTRY).join(', ')}`);
@@ -141,22 +241,6 @@ export function resolveReleasePlan({ packageName, releaseMode, repoRoot = proces
     tagAlreadyExists = false;
   }
 
-  if (releaseMode === 'release' && tagAlreadyExists) {
-    throw new Error(
-      `Release tag '${candidateTag}' already exists for ${pkgMeta.dir}/package.json version '${baseVersion}'. ` +
-        `Under the pre-release bump model, open and merge a PR bumping ${pkgMeta.dir}/package.json (and package-lock.json) to the next SemVer version before triggering release_mode=release.`
-    );
-  }
-
-  const snapshotBaseVer = tagAlreadyExists
-    ? `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`
-    : `${parsed.major}.${parsed.minor}.${parsed.patch}`;
-  const version = releaseMode === 'snapshot'
-    ? (shortSha ? `${snapshotBaseVer}-snapshot.${shortSha}` : `${snapshotBaseVer}-snapshot`)
-    : baseVersion;
-  const gitTag = releaseMode === 'snapshot' ? '-' : candidateTag;
-  const npmDistTag = releaseMode === 'release' ? 'latest' : '';
-
   let lastTag = '';
   try {
     lastTag = execFileSync(
@@ -182,6 +266,63 @@ export function resolveReleasePlan({ packageName, releaseMode, repoRoot = proces
     }
   }
 
+  const hasSubstantiveChanges = hasChanges
+    ? hasSubstantivePackageChanges({ repoRoot, lastTag, packageDir: pkgMeta.dir })
+    : false;
+
+  if (releaseMode === 'release') {
+    if (allowSkipWhenUnchanged) {
+      if (!hasSubstantiveChanges) {
+        return {
+          packageName,
+          packageDir: pkgMeta.dir,
+          version: baseVersion,
+          gitTag: candidateTag,
+          npmDistTag: 'latest',
+          lastTag,
+          hasChanges,
+          hasSubstantiveChanges: false,
+          shouldRun: false,
+          needsPublish: false,
+          skipReason: lastTag
+            ? `No substantive changes in ${pkgMeta.dir} since ${lastTag}; skipping scheduled release promotion.`
+            : `No substantive changes in ${pkgMeta.dir}; skipping scheduled release promotion.`,
+        };
+      }
+      if (tagAlreadyExists) {
+        return {
+          packageName,
+          packageDir: pkgMeta.dir,
+          version: baseVersion,
+          gitTag: candidateTag,
+          npmDistTag: 'latest',
+          lastTag,
+          hasChanges,
+          hasSubstantiveChanges,
+          shouldRun: false,
+          needsPublish: false,
+          skipReason:
+            `Version '${baseVersion}' in ${pkgMeta.dir}/package.json is already tagged (${candidateTag}); ` +
+            `skipping scheduled release promotion (unreleased changes exist in ${pkgMeta.dir} — bump package.json to stage the next release).`,
+        };
+      }
+    } else if (tagAlreadyExists) {
+      throw new Error(
+        `Release tag '${candidateTag}' already exists for ${pkgMeta.dir}/package.json version '${baseVersion}'. ` +
+          `Under the pre-release bump model, open and merge a PR bumping ${pkgMeta.dir}/package.json (and package-lock.json) to the next SemVer version before triggering release_mode=release.`
+      );
+    }
+  }
+
+  const snapshotBaseVer = tagAlreadyExists
+    ? `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`
+    : `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+  const version = releaseMode === 'snapshot'
+    ? (shortSha ? `${snapshotBaseVer}-snapshot.${shortSha}` : `${snapshotBaseVer}-snapshot`)
+    : baseVersion;
+  const gitTag = releaseMode === 'snapshot' ? '-' : candidateTag;
+  const npmDistTag = releaseMode === 'release' ? 'latest' : '';
+
   return {
     packageName,
     packageDir: pkgMeta.dir,
@@ -189,7 +330,11 @@ export function resolveReleasePlan({ packageName, releaseMode, repoRoot = proces
     gitTag,
     npmDistTag,
     lastTag,
+    hasChanges,
+    hasSubstantiveChanges,
+    shouldRun: true,
     needsPublish: releaseMode === 'release' && hasChanges,
+    skipReason: '',
   };
 }
 
@@ -298,6 +443,7 @@ export async function verifyVersionHigherThanNpm({
   fetchImpl = globalThis.fetch,
   maxAttempts = 4,
   baseDelayMs = 1000,
+  allowSkipWhenAlreadyPublished = false,
 }) {
   if (!packageName || !/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(packageName)) {
     throw new Error(`Invalid package name '${packageName}'.`);
@@ -335,6 +481,8 @@ export async function verifyVersionHigherThanNpm({
     if (response.status === 404) {
       return {
         ok: true,
+        skipped: false,
+        skipReason: '',
         packageName,
         targetVersion,
         publishedHighest: null,
@@ -350,13 +498,6 @@ export async function verifyVersionHigherThanNpm({
         ? distTags.latest.trim()
         : null;
 
-      if (Object.prototype.hasOwnProperty.call(versionsObj, targetVersion)) {
-        throw new Error(
-          `Version '${targetVersion}' of '${packageName}' is already published on npmjs.com (latest: '${latestTag || 'none'}'). ` +
-            `Bump package.json (and package-lock.json) in a PR to a strictly higher SemVer version before running release_mode=release.`
-        );
-      }
-
       const publishedVersions = Object.keys(versionsObj).filter((v) => SEMVER_RE.test(v));
       if (latestTag && !publishedVersions.includes(latestTag)) {
         publishedVersions.push(latestTag);
@@ -369,7 +510,37 @@ export async function verifyVersionHigherThanNpm({
         }
       }
 
-      if (publishedHighest && compareSemVer(targetVersion, publishedHighest) <= 0) {
+      const cmp = publishedHighest ? compareSemVer(targetVersion, publishedHighest) : 1;
+      const alreadyInVersions = Object.prototype.hasOwnProperty.call(versionsObj, targetVersion);
+
+      if (publishedHighest && cmp < 0) {
+        throw new Error(
+          `Version '${targetVersion}' in package.json must be strictly higher than what is published on npmjs.com ` +
+            `(highest published: '${publishedHighest}', latest dist-tag: '${latestTag || 'none'}'). ` +
+            `Bump package.json (and package-lock.json) in a PR before running release_mode=release.`
+        );
+      }
+
+      if (alreadyInVersions || (publishedHighest && cmp === 0)) {
+        if (allowSkipWhenAlreadyPublished) {
+          return {
+            ok: true,
+            skipped: true,
+            skipReason:
+              `Version '${targetVersion}' of '${packageName}' is already published on npmjs.com ` +
+              `(latest: '${latestTag || 'none'}'); skipping scheduled release promotion.`,
+            packageName,
+            targetVersion,
+            publishedHighest,
+            latestTag,
+          };
+        }
+        if (alreadyInVersions) {
+          throw new Error(
+            `Version '${targetVersion}' of '${packageName}' is already published on npmjs.com (latest: '${latestTag || 'none'}'). ` +
+              `Bump package.json (and package-lock.json) in a PR to a strictly higher SemVer version before running release_mode=release.`
+          );
+        }
         throw new Error(
           `Version '${targetVersion}' in package.json must be strictly higher than what is published on npmjs.com ` +
             `(highest published: '${publishedHighest}', latest dist-tag: '${latestTag || 'none'}'). ` +
@@ -379,6 +550,8 @@ export async function verifyVersionHigherThanNpm({
 
       return {
         ok: true,
+        skipped: false,
+        skipReason: '',
         packageName,
         targetVersion,
         publishedHighest,
@@ -420,13 +593,19 @@ export function appendDashboardRun(runsFilePath, newEntry, maxEntries = 200) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const cmd = process.argv[2];
-  if (cmd === 'resolve') {
+  if (cmd === 'check-biweekly') {
+    const nowInput = process.env.NOW_ISO ? new Date(process.env.NOW_ISO) : new Date();
+    const res = isBiweeklyReleaseWeek(nowInput);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (cmd === 'resolve') {
     const plan = resolveReleasePlan({
       packageName: process.env.PACKAGE_NAME || 'gdc-cas',
       releaseMode: process.env.RELEASE_MODE || 'snapshot',
       commitSha: process.env.COMMIT_SHA || '',
+      allowSkipWhenUnchanged: process.env.ALLOW_SKIP_WHEN_UNCHANGED === 'true',
     });
     if (process.env.GITHUB_OUTPUT) {
+      const cleanSkipReason = String(plan.skipReason || '').replace(/[\r\n]+/g, ' ');
       const lines = [
         `package_name=${plan.packageName}`,
         `package_dir=${plan.packageDir}`,
@@ -434,7 +613,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         `git_tag=${plan.gitTag}`,
         `npm_dist_tag=${plan.npmDistTag}`,
         `last_tag=${plan.lastTag}`,
+        `should_run=${plan.shouldRun}`,
         `needs_publish=${plan.needsPublish}`,
+        `skip_reason=${cleanSkipReason}`,
       ];
       fs.appendFileSync(process.env.GITHUB_OUTPUT, lines.join('\n') + '\n');
     }
@@ -459,6 +640,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     const res = await verifyVersionHigherThanNpm({
       packageName: process.env.PACKAGE_NAME || 'gdc-cas',
       targetVersion: process.env.TARGET_VERSION || '',
+      allowSkipWhenAlreadyPublished: process.env.ALLOW_SKIP_WHEN_ALREADY_PUBLISHED === 'true',
     });
     console.log(JSON.stringify(res, null, 2));
   } else if (cmd === 'bump') {
@@ -500,7 +682,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     };
     appendDashboardRun(targetFile, entry);
   } else {
-    console.error(`Unknown subcommand '${cmd}'. Expected resolve, check-npm, prepare-notes, bump, or append-run.`);
+    console.error(`Unknown subcommand '${cmd}'. Expected check-biweekly, resolve, check-npm, prepare-notes, bump, or append-run.`);
     process.exit(1);
   }
 }

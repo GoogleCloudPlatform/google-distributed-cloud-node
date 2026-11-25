@@ -15,10 +15,14 @@
 name: gdc-node Release & Qualification Pipeline
 
 on:
-  # Weeknight GDC Air-gapped Staging snapshot qualification (Mon-Fri 02:00 PST / 10:00 UTC).
-  # Snapshot runs execute all unit, smoke, and GDC Staging integration tests without publishing to npmjs.
   schedule:
+    # Weeknight GDC Air-gapped Staging snapshot qualification (Mon-Fri 02:00 PST / 10:00 UTC).
+    # Snapshot runs execute all unit, smoke, and GDC Staging integration tests without publishing to npmjs.
     - cron: '0 10 * * 1-5'
+    # Biweekly GDC Air-gapped Staging -> npm release promotion check (every other Monday 04:00 PST / 12:00 UTC).
+    # Cron fires weekly on Mondays; authorize enforces strict 14-day epoch-week parity and
+    # skips cleanly (instead of failing) when there are no substantive package changes or package.json is not bumped.
+    - cron: '0 12 * * 1'
   workflow_dispatch:
     inputs:
       package:
@@ -63,7 +67,9 @@ jobs:
       git_tag: ${{ steps.plan.outputs.git_tag }}
       last_tag: ${{ steps.plan.outputs.last_tag }}
       npm_dist_tag: ${{ steps.plan.outputs.npm_dist_tag }}
+      should_run: ${{ steps.plan.outputs.should_run }}
       needs_publish: ${{ steps.plan.outputs.needs_publish }}
+      skip_reason: ${{ steps.plan.outputs.skip_reason }}
       start_epoch: ${{ steps.plan.outputs.start_epoch }}
     steps:
       - name: Checkout repository
@@ -81,6 +87,7 @@ jobs:
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
@@ -89,14 +96,17 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x ./scripts/release/retry.sh
-          echo "start_epoch=$(date -u +%s)" >> "${GITHUB_OUTPUT}"
+          start_epoch="$(date -u +%s)"
 
           if [[ "${REF_NAME}" != "main" ]]; then
             echo "::error::The release pipeline must be triggered from 'main' (got '${REF_NAME}')."
             exit 1
           fi
 
+          pkg="${INPUT_PACKAGE:-gdc-cas}"
           mode="snapshot"
+          is_scheduled_release="false"
+
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             ./scripts/release/retry.sh 3 2 git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             owners_raw="$(git show origin/main:CODEOWNERS 2>/dev/null || git show origin/main:.github/CODEOWNERS 2>/dev/null || cat CODEOWNERS)"
@@ -108,27 +118,116 @@ jobs:
             if [[ "${INPUT_MODE}" == "release" ]]; then
               mode="release"
             fi
+          elif [[ "${EVENT_NAME}" == "schedule" && "${EVENT_SCHEDULE}" == "0 12 * * 1" ]]; then
+            mode="release"
+            is_scheduled_release="true"
           fi
 
-          pkg="${INPUT_PACKAGE:-gdc-cas}"
-          echo "release_mode=${mode}" >> "${GITHUB_OUTPUT}"
+          write_outputs() {
+            local out_should_run="$1"
+            local out_needs_publish="$2"
+            local out_pkg_name="$3"
+            local out_pkg_dir="$4"
+            local out_version="$5"
+            local out_git_tag="$6"
+            local out_npm_dist_tag="$7"
+            local out_last_tag="$8"
+            local out_skip_reason
+            out_skip_reason="$(printf '%s' "$9" | tr '\r\n' '  ')"
+            {
+              echo "start_epoch=${start_epoch}"
+              echo "release_mode=${mode}"
+              echo "package_name=${out_pkg_name}"
+              echo "package_dir=${out_pkg_dir}"
+              echo "version=${out_version}"
+              echo "git_tag=${out_git_tag}"
+              echo "npm_dist_tag=${out_npm_dist_tag}"
+              echo "last_tag=${out_last_tag}"
+              echo "should_run=${out_should_run}"
+              echo "needs_publish=${out_needs_publish}"
+              echo "skip_reason=${out_skip_reason}"
+            } >> "${GITHUB_OUTPUT}"
+          }
+
+          if [[ "${is_scheduled_release}" == "true" ]]; then
+            biweekly_json="$(node ./scripts/release/semver-helper.mjs check-biweekly)"
+            echo "${biweekly_json}"
+            is_release_week="$(jq -r '.isReleaseWeek' <<< "${biweekly_json}")"
+            if [[ "${is_release_week}" != "true" ]]; then
+              skip_msg="Off-week Monday for biweekly release schedule; skipping scheduled release promotion."
+              echo "::notice::${skip_msg}"
+              {
+                echo "### Biweekly Release Promotion Skipped"
+                echo ""
+                echo "${skip_msg}"
+              } >> "${GITHUB_STEP_SUMMARY}"
+              write_outputs "false" "false" "${pkg}" "cas/${pkg}" "-" "-" "" "" "${skip_msg}"
+              exit 0
+            fi
+          fi
 
           plan_json="$(
-            PACKAGE_NAME="${pkg}" RELEASE_MODE="${mode}" COMMIT_SHA="${COMMIT_SHA}" \
+            GITHUB_OUTPUT="" \
+            PACKAGE_NAME="${pkg}" \
+            RELEASE_MODE="${mode}" \
+            ALLOW_SKIP_WHEN_UNCHANGED="${is_scheduled_release}" \
+            COMMIT_SHA="${COMMIT_SHA}" \
               node ./scripts/release/semver-helper.mjs resolve
           )"
           echo "${plan_json}"
 
-          if [[ "${mode}" == "release" ]]; then
-            target_version="$(jq -r '.version' <<< "${plan_json}")"
-            PACKAGE_NAME="${pkg}" TARGET_VERSION="${target_version}" \
-              node ./scripts/release/semver-helper.mjs check-npm
+          plan_pkg_name="$(jq -r '.packageName' <<< "${plan_json}")"
+          plan_pkg_dir="$(jq -r '.packageDir' <<< "${plan_json}")"
+          plan_version="$(jq -r '.version' <<< "${plan_json}")"
+          plan_git_tag="$(jq -r '.gitTag' <<< "${plan_json}")"
+          plan_npm_dist_tag="$(jq -r '.npmDistTag' <<< "${plan_json}")"
+          plan_last_tag="$(jq -r '.lastTag' <<< "${plan_json}")"
+          plan_should_run="$(jq -r '.shouldRun' <<< "${plan_json}")"
+          plan_needs_publish="$(jq -r '.needsPublish' <<< "${plan_json}")"
+          plan_skip_reason="$(jq -r '.skipReason // ""' <<< "${plan_json}")"
+
+          if [[ "${plan_should_run}" == "true" && "${mode}" == "release" ]]; then
+            npm_check_json="$(
+              PACKAGE_NAME="${plan_pkg_name}" \
+              TARGET_VERSION="${plan_version}" \
+              ALLOW_SKIP_WHEN_ALREADY_PUBLISHED="${is_scheduled_release}" \
+                node ./scripts/release/semver-helper.mjs check-npm
+            )"
+            echo "${npm_check_json}"
+            if [[ "$(jq -r '.skipped // false' <<< "${npm_check_json}")" == "true" ]]; then
+              plan_should_run="false"
+              plan_needs_publish="false"
+              plan_skip_reason="$(jq -r '.skipReason // ""' <<< "${npm_check_json}")"
+            fi
+          fi
+
+          write_outputs \
+            "${plan_should_run}" \
+            "${plan_needs_publish}" \
+            "${plan_pkg_name}" \
+            "${plan_pkg_dir}" \
+            "${plan_version}" \
+            "${plan_git_tag}" \
+            "${plan_npm_dist_tag}" \
+            "${plan_last_tag}" \
+            "${plan_skip_reason}"
+
+          if [[ "${plan_should_run}" != "true" ]]; then
+            echo "::notice::${plan_skip_reason}"
+            {
+              echo "### Biweekly Release Promotion Skipped"
+              echo ""
+              echo "- **Package:** \`${plan_pkg_name}\`"
+              echo "- **Current \`package.json\` version:** \`${plan_version}\`"
+              echo "- **Last release tag:** \`${plan_last_tag:-none}\`"
+              echo "- **Reason:** ${plan_skip_reason}"
+            } >> "${GITHUB_STEP_SUMMARY}"
           fi
 
   prepare-release-notes:
     name: Prepare Release Notes (GitHub API)
     needs: authorize
-    if: needs.authorize.outputs.release_mode == 'release'
+    if: needs.authorize.outputs.should_run == 'true' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -171,6 +270,7 @@ jobs:
   certify-staging:
     name: Certify Package on GDC Staging
     needs: authorize
+    if: needs.authorize.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     environment: gdc-staging
     timeout-minutes: 20
@@ -242,7 +342,7 @@ jobs:
   publish-npm:
     name: Publish via Google OSS Exit Gate & Tag Release
     needs: [authorize, prepare-release-notes, certify-staging]
-    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true'
+    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.should_run == 'true' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     environment: npm-release
     timeout-minutes: 20
@@ -350,7 +450,7 @@ jobs:
   verify-npm-release:
     name: Verify Published npm Package on GDC Staging
     needs: [authorize, publish-npm]
-    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true' && needs.publish-npm.result == 'success'
+    if: github.ref == 'refs/heads/main' && needs.authorize.outputs.should_run == 'true' && needs.authorize.outputs.release_mode == 'release' && needs.authorize.outputs.needs_publish == 'true' && needs.publish-npm.result == 'success'
     runs-on: ubuntu-latest
     environment: gdc-staging
     timeout-minutes: 20
@@ -388,7 +488,7 @@ jobs:
   update-dashboard:
     name: Record Run Telemetry & Upload Pages Artifact
     needs: [authorize, prepare-release-notes, certify-staging, publish-npm, verify-npm-release]
-    if: always() && github.ref == 'refs/heads/main' && (needs.authorize.result == 'success' || needs.authorize.result == 'failure')
+    if: always() && github.ref == 'refs/heads/main' && ((needs.authorize.result == 'success' && needs.authorize.outputs.should_run == 'true') || needs.authorize.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
       contents: write
