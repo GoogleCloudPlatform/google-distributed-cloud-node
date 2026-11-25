@@ -99,21 +99,21 @@ To interact with GDC air-gapped services using this SDK (currently CAS), you wil
 Continuous qualification and official SemVer npm releases are tracked through the GitHub Pages pipeline monitor and GitHub Actions summaries:
 
 * **Release Pipeline Dashboard ([`https://googlecloudplatform.github.io/google-distributed-cloud-node/`](https://googlecloudplatform.github.io/google-distributed-cloud-node/))**:
-  * **Live Active Run Polling**: Automatically polls in-progress, queued, and waiting GitHub Actions runs to display real-time stage-by-stage progress (`Authorize & SemVer` → `Release Notes` → `GDC Staging (KRM + gRPC)` → `Publish via OSS Exit Gate`) with a live elapsed timer.
+  * **Live Active Run Polling**: Automatically polls in-progress, queued, and waiting GitHub Actions runs to display real-time stage-by-stage progress (`Authorize & SemVer` → `Release Notes` → `GDC Staging (KRM + gRPC)` → `Publish via OSS Exit Gate` → `Verify Published npm Package`) with a live elapsed timer.
   * **KPI Overview & Registry Telemetry**: Displays total recorded runs, overall pass rate, latest certified `release` and `snapshot` versions, live `npmjs.org` published version, and 30-day npm download counts.
   * **Filterable Execution History**: Tracks historical `snapshot` and `release` runs with package/mode/status filters, tested commit SHAs, trigger actors, stage badges, and expandable GitHub API release notes.
 * **GitHub Actions Job Summary**: Every pipeline execution publishes a structured summary table (and prepared release notes in `release` mode) under the workflow run's **Summary** tab.
 
 ### Execution Modes (`snapshot` vs. `release`)
 
-The **[gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** supports two execution modes:
+The **[gdc-node Release & Qualification Pipeline](https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/workflows/release-pipeline.yaml)** uses the standard npm **pre-release version bump model**: `cas/gdc-cas/package.json` on `main` always reflects the **currently published version** on `npmjs.com` until a maintainer bumps it in a PR right before cutting the next release.
 
 * **`snapshot` Mode (Weeknight Qualification / Pre-Release)**:
   * Runs automatically every weeknight (**Monday–Friday at `02:00 PST` / `10:00 UTC`**) and on manual `snapshot` dispatches.
-  * Resolves `<version>-snapshot.<short_sha>` from `cas/gdc-cas/package.json`, packs the candidate npm tarball, runs all unit, type, consumer smoke, and live GDC Air-gapped Staging integration tests (both KRM and direct gRPC), records telemetry on the dashboard, and **skips `npmjs.com` registry publication**.
+  * Resolves `<next-version>-snapshot.<short_sha>` (auto-incrementing the patch component when the `package.json` version is already tagged), packs the candidate npm tarball, runs all unit, type, consumer smoke, and live GDC Air-gapped Staging integration tests (both KRM and direct gRPC), records telemetry on the dashboard, and **skips `npmjs.com` registry publication**.
 * **`release` Mode (Official SemVer Release)**:
-  * Triggered by repository maintainers listed in [`CODEOWNERS`](./CODEOWNERS) from `main`.
-  * Executes full GDC Air-gapped Staging qualification, prepares structured release notes via the GitHub REST API, publishes the certified tarball to `npmjs.com` via Google OSS Exit Gate (Workload Identity Federation), creates the `gdc-cas-v<version>` GitHub Release with SHA-512 integrity digest, and opens an automated post-release SemVer bump PR.
+  * **Step 1 (Pre-release version bump PR):** Open and merge a PR bumping `cas/gdc-cas/package.json` (and `package-lock.json`, plus `CHANGELOG.md` if applicable) to the target SemVer version (`patch`, `minor`, or `major`).
+  * **Step 2 (Dispatch release):** Triggered by repository maintainers listed in [`CODEOWNERS`](./CODEOWNERS) from `main`. Verifies the `package.json` version is not already tagged in Git and is **strictly higher (SemVer 2.0)** than what is currently published on `npmjs.com`, executes full GDC Air-gapped Staging qualification, prepares structured release notes via the GitHub REST API, publishes the certified tarball to `npmjs.com` via Google OSS Exit Gate (Workload Identity Federation), creates the `gdc-cas-v<version>` GitHub Release with SHA-512 integrity digest, and then **installs the newly published package directly from `registry.npmjs.org` to run a post-publish end-to-end verification (UC1–UC6) against GDC Air-gapped Staging**.
 
 ### Triggering the Pipeline
 
@@ -122,8 +122,7 @@ Maintainers can dispatch the workflow from **[Actions → gdc-node Release & Qua
 | Input | Default | Description |
 | :--- | :--- | :--- |
 | `package` | `gdc-cas` | Target SDK package to qualify or release. |
-| `release_mode` | `snapshot` | Execution mode: `snapshot` (Staging qualification only, no npm publish) or `release` (official SemVer release + npm publish). |
-| `next_version` | `bump-patch` | Automated post-release SemVer bump PR operation (`bump-patch`, `bump-minor`, `bump-major`, or `noop`). |
+| `release_mode` | `snapshot` | Execution mode: `snapshot` (Staging qualification only, no npm publish) or `release` (official SemVer release + npm publish + post-publish live npm verification). |
 | `oss_exit_gate_project` | `gdc-node` | Google OSS Exit Gate project slug used during `release` publication. |
 
 ```bash
@@ -134,13 +133,12 @@ gh workflow run release-pipeline.yaml \
   -f package=gdc-cas \
   -f release_mode=snapshot
 
-# Trigger an official SemVer release and open a patch-bump PR
+# Trigger an official SemVer release (after merging a pre-release version bump PR on main)
 gh workflow run release-pipeline.yaml \
   --repo GoogleCloudPlatform/google-distributed-cloud-node \
   --ref main \
   -f package=gdc-cas \
-  -f release_mode=release \
-  -f next_version=bump-patch
+  -f release_mode=release
 ```
 
 ---

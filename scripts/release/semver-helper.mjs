@@ -13,9 +13,10 @@
 // limitations under the License.
 
 /**
- * SemVer resolution (`snapshot` vs `release`), GitHub API release-notes
- * preparation, post-release version bump calculation, and GitHub Pages
- * `runs.json` ledger updater for Node.js SDK releases.
+ * SemVer resolution (`snapshot` vs `release`) under the pre-release bump model
+ * (where `package.json` on `main` matches the latest published npm version until
+ * bumped in a pre-release PR), GitHub API release-notes preparation, and GitHub
+ * Pages `runs.json` ledger updater for Node.js SDK releases.
  */
 
 import fs from 'node:fs';
@@ -43,6 +44,40 @@ export function parseSemVer(version) {
     patch: Number(match[3]),
     prerelease: match[4] || '',
   };
+}
+
+/**
+ * Compares two SemVer 2.0.0 version strings.
+ * Returns -1 if a < b, 0 if a == b, and 1 if a > b.
+ */
+export function compareSemVer(a, b) {
+  const pa = parseSemVer(a);
+  const pb = parseSemVer(b);
+
+  if (pa.major !== pb.major) return pa.major > pb.major ? 1 : -1;
+  if (pa.minor !== pb.minor) return pa.minor > pb.minor ? 1 : -1;
+  if (pa.patch !== pb.patch) return pa.patch > pb.patch ? 1 : -1;
+
+  if (!pa.prerelease && !pb.prerelease) return 0;
+  if (!pa.prerelease) return 1;
+  if (!pb.prerelease) return -1;
+
+  const aIds = pa.prerelease.split('.');
+  const bIds = pb.prerelease.split('.');
+  const len = Math.max(aIds.length, bIds.length);
+  for (let i = 0; i < len; i += 1) {
+    if (i >= aIds.length) return -1;
+    if (i >= bIds.length) return 1;
+    const ai = aIds[i];
+    const bi = bIds[i];
+    if (ai === bi) continue;
+    const aNum = /^\d+$/.test(ai);
+    const bNum = /^\d+$/.test(bi);
+    if (aNum && bNum) return Number(ai) > Number(bi) ? 1 : -1;
+    if (aNum !== bNum) return aNum ? -1 : 1;
+    return ai > bi ? 1 : -1;
+  }
+  return 0;
 }
 
 export function computeNextVersion(currentVersion, bumpOp) {
@@ -94,11 +129,32 @@ export function resolveReleasePlan({ packageName, releaseMode, repoRoot = proces
     }
   }
 
-  const coreVer = `${parsed.major}.${parsed.minor}.${parsed.patch}`;
+  const candidateTag = `${pkgMeta.tagPrefix}${baseVersion}`;
+  let tagAlreadyExists = false;
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${candidateTag}`], {
+      cwd: repoRoot,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    tagAlreadyExists = true;
+  } catch {
+    tagAlreadyExists = false;
+  }
+
+  if (releaseMode === 'release' && tagAlreadyExists) {
+    throw new Error(
+      `Release tag '${candidateTag}' already exists for ${pkgMeta.dir}/package.json version '${baseVersion}'. ` +
+        `Under the pre-release bump model, open and merge a PR bumping ${pkgMeta.dir}/package.json (and package-lock.json) to the next SemVer version before triggering release_mode=release.`
+    );
+  }
+
+  const snapshotBaseVer = tagAlreadyExists
+    ? `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`
+    : `${parsed.major}.${parsed.minor}.${parsed.patch}`;
   const version = releaseMode === 'snapshot'
-    ? (shortSha ? `${coreVer}-snapshot.${shortSha}` : `${coreVer}-snapshot`)
+    ? (shortSha ? `${snapshotBaseVer}-snapshot.${shortSha}` : `${snapshotBaseVer}-snapshot`)
     : baseVersion;
-  const gitTag = releaseMode === 'snapshot' ? '-' : `${pkgMeta.tagPrefix}${baseVersion}`;
+  const gitTag = releaseMode === 'snapshot' ? '-' : candidateTag;
   const npmDistTag = releaseMode === 'release' ? 'latest' : '';
 
   let lastTag = '';
@@ -229,6 +285,122 @@ export async function generateReleaseNotesViaGitHubApi({
   }
 }
 
+/**
+ * Verifies that `targetVersion` from `package.json` on `main` is strictly higher
+ * (per SemVer 2.0.0) than every version currently published on npmjs.com
+ * (including `dist-tags.latest` and all entries in `.versions`).
+ * Allows initial first-time publication when the registry returns HTTP 404.
+ */
+export async function verifyVersionHigherThanNpm({
+  packageName,
+  targetVersion,
+  registryBaseUrl = process.env.NPM_REGISTRY_URL || 'https://registry.npmjs.org',
+  fetchImpl = globalThis.fetch,
+  maxAttempts = 4,
+  baseDelayMs = 1000,
+}) {
+  if (!packageName || !/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(packageName)) {
+    throw new Error(`Invalid package name '${packageName}'.`);
+  }
+  parseSemVer(targetVersion);
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('Global fetch implementation is required (Node.js 22+).');
+  }
+
+  const base = String(registryBaseUrl).replace(/\/+$/, '');
+  const encodedPkg = packageName.replace(/\//g, '%2F');
+  const url = `${base}/${encodedPkg}`;
+
+  let attempt = 1;
+  let delayMs = baseDelayMs;
+  while (true) {
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+    } catch (netErr) {
+      if (attempt >= maxAttempts) {
+        throw new Error(`npm registry lookup network failure after ${attempt} attempts: ${netErr?.message || netErr}`);
+      }
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        delayMs *= 2;
+      }
+      attempt += 1;
+      continue;
+    }
+
+    if (response.status === 404) {
+      return {
+        ok: true,
+        packageName,
+        targetVersion,
+        publishedHighest: null,
+        latestTag: null,
+      };
+    }
+
+    if (response.ok) {
+      const data = await response.json();
+      const versionsObj = data?.versions && typeof data.versions === 'object' ? data.versions : {};
+      const distTags = data?.['dist-tags'] && typeof data['dist-tags'] === 'object' ? data['dist-tags'] : {};
+      const latestTag = typeof distTags.latest === 'string' && SEMVER_RE.test(distTags.latest.trim())
+        ? distTags.latest.trim()
+        : null;
+
+      if (Object.prototype.hasOwnProperty.call(versionsObj, targetVersion)) {
+        throw new Error(
+          `Version '${targetVersion}' of '${packageName}' is already published on npmjs.com (latest: '${latestTag || 'none'}'). ` +
+            `Bump package.json (and package-lock.json) in a PR to a strictly higher SemVer version before running release_mode=release.`
+        );
+      }
+
+      const publishedVersions = Object.keys(versionsObj).filter((v) => SEMVER_RE.test(v));
+      if (latestTag && !publishedVersions.includes(latestTag)) {
+        publishedVersions.push(latestTag);
+      }
+
+      let publishedHighest = null;
+      for (const v of publishedVersions) {
+        if (!publishedHighest || compareSemVer(v, publishedHighest) > 0) {
+          publishedHighest = v;
+        }
+      }
+
+      if (publishedHighest && compareSemVer(targetVersion, publishedHighest) <= 0) {
+        throw new Error(
+          `Version '${targetVersion}' in package.json must be strictly higher than what is published on npmjs.com ` +
+            `(highest published: '${publishedHighest}', latest dist-tag: '${latestTag || 'none'}'). ` +
+            `Bump package.json (and package-lock.json) in a PR before running release_mode=release.`
+        );
+      }
+
+      return {
+        ok: true,
+        packageName,
+        targetVersion,
+        publishedHighest,
+        latestTag,
+      };
+    }
+
+    const errText = await response.text().catch(() => '');
+    if (attempt >= maxAttempts || !RETRYABLE_HTTP_STATUS.has(response.status)) {
+      throw new Error(`npm registry lookup failed for '${packageName}' (HTTP ${response.status}): ${errText}`);
+    }
+
+    const retryAfterSec = Number(response.headers?.get?.('retry-after') || 0);
+    const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : delayMs;
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      delayMs *= 2;
+    }
+    attempt += 1;
+  }
+}
+
 export function appendDashboardRun(runsFilePath, newEntry, maxEntries = 200) {
   let existing = [];
   if (fs.existsSync(runsFilePath)) {
@@ -283,6 +455,12 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     fs.mkdirSync(path.dirname(outputFile), { recursive: true });
     fs.writeFileSync(outputFile, `${result.body}\n`, 'utf8');
     console.log(result.body);
+  } else if (cmd === 'check-npm') {
+    const res = await verifyVersionHigherThanNpm({
+      packageName: process.env.PACKAGE_NAME || 'gdc-cas',
+      targetVersion: process.env.TARGET_VERSION || '',
+    });
+    console.log(JSON.stringify(res, null, 2));
   } else if (cmd === 'bump') {
     const nextVer = computeNextVersion(process.env.CURRENT_VERSION || '', process.env.NEXT_VERSION_OP || 'noop');
     console.log(nextVer);
@@ -315,13 +493,14 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         notes: process.env.STAGE_NOTES || 'skipped',
         staging: process.env.STAGE_STAGING || 'skipped',
         publish: process.env.STAGE_PUBLISH || 'skipped',
+        verifyNpm: process.env.STAGE_VERIFY_NPM || 'skipped',
       },
       ...(releaseNotes ? { releaseNotes } : {}),
       ...(process.env.RELEASE_URL ? { releaseUrl: process.env.RELEASE_URL } : {}),
     };
     appendDashboardRun(targetFile, entry);
   } else {
-    console.error(`Unknown subcommand '${cmd}'. Expected resolve, prepare-notes, bump, or append-run.`);
+    console.error(`Unknown subcommand '${cmd}'. Expected resolve, check-npm, prepare-notes, bump, or append-run.`);
     process.exit(1);
   }
 }
