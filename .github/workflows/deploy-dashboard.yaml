@@ -30,16 +30,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Publish Dashboard (GitHub Pages)
+  build:
+    name: Build & Upload Dashboard Artifact
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      pages: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,6 +44,8 @@ jobs:
 
       - name: Preserve recorded run history from gh-pages branch
         run: |
+          set -euo pipefail
+          mkdir -p ./dashboard/data
           if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
             git fetch origin gh-pages:refs/remotes/origin/gh-pages
             if git show origin/gh-pages:data/runs.json > ./dashboard/data/runs.json.remote 2>/dev/null; then
@@ -62,6 +60,37 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./dashboard
+
+  deploy:
+    name: Publish Dashboard (GitHub Pages)
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Wait for github-pages artifact to be indexed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_SLUG: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            count="$(gh api "repos/${REPO_SLUG}/actions/runs/${RUN_ID}/artifacts?name=github-pages" --jq '.total_count' 2>/dev/null || echo 0)"
+            if [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge 1 ]]; then
+              echo "github-pages artifact indexed (count=${count}) on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Waiting for github-pages artifact to appear in GitHub API (attempt ${attempt}/20)..."
+            sleep 3
+          done
+          echo "::error::Timed out waiting for github-pages artifact to appear in GitHub API."
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
