@@ -1,5 +1,27 @@
 [
   {
+    "runId": "45797828028",
+    "runNumber": "9",
+    "timestamp": "2026-11-26T10:05:27.151Z",
+    "package": "gdc-cas",
+    "releaseMode": "snapshot",
+    "trigger": "schedule",
+    "actor": "dilipkumar2k6",
+    "status": "success",
+    "version": "0.1.1-snapshot.cbc26de",
+    "tag": "-",
+    "commitSha": "cbc26dec70cdda9939e46aafeff333bdecca00ed",
+    "duration": "1m 9s",
+    "runUrl": "https://github.com/GoogleCloudPlatform/google-distributed-cloud-node/actions/runs/45797828028",
+    "stages": {
+      "authorize": "success",
+      "notes": "skipped",
+      "staging": "success",
+      "publish": "skipped",
+      "verifyNpm": "skipped"
+    }
+  },
+  {
     "runId": "45638237883",
     "runNumber": "8",
     "timestamp": "2026-11-25T14:50:53.834Z",

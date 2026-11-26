@@ -285,7 +285,7 @@
               <th>Status</th>
               <th>Artifact Version &amp; Tag</th>
               <th>Commit</th>
-              <th>Stages (Auth / Notes / Stg / Pub)</th>
+              <th>Stages (Auth / Notes / Stg / Pub / Verify)</th>
               <th>Duration</th>
             </tr>
           </thead>
@@ -305,7 +305,8 @@
       ['authorize', '1. Authorize & SemVer', 'Auth'],
       ['notes', '2. Prepare Release Notes', 'Notes'],
       ['staging', '3. Certify on GDC Staging', 'Stg'],
-      ['publish', '4. Publish via OSS Exit Gate', 'Pub']
+      ['publish', '4. Publish via OSS Exit Gate', 'Pub'],
+      ['verifyNpm', '5. Verify Published npm Package', 'Verify']
     ];
 
     let allRuns = [];
@@ -414,13 +415,15 @@
                 const jobs = Array.isArray(jobsData.jobs) ? jobsData.jobs : [];
                 const authJob = jobs.find((j) => (j.name || '').includes('Authorize'));
                 const notesJob = jobs.find((j) => (j.name || '').includes('Release Notes'));
-                const stgJob = jobs.find((j) => (j.name || '').includes('Staging'));
-                const pubJob = jobs.find((j) => (j.name || '').includes('Publish'));
+                const stgJob = jobs.find((j) => (j.name || '').includes('Certify'));
+                const pubJob = jobs.find((j) => (j.name || '').includes('Publish via'));
+                const verifyJob = jobs.find((j) => (j.name || '').includes('Verify Published npm'));
                 stages = {
                   authorize: mapJobState(authJob),
                   notes: mapJobState(notesJob),
                   staging: mapJobState(stgJob),
                   publish: mapJobState(pubJob),
+                  verifyNpm: mapJobState(verifyJob),
                 };
                 if (notesJob && notesJob.status !== 'completed') {
                   detectedMode = 'release';
